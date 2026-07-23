@@ -1039,7 +1039,7 @@ def save_balance_text(message):
 def save_withdraw_text(message):
     config["WITHDRAW_TEXT"] = message.text.strip()
     save_config(config)
-    bot.send_message(message.chat.id, "✅ উইথড্র টেক্সট আপডেট হয়েছে।")
+    bot.send_message(message.chat.id, "✅ ওটিপি আপডেট হয়েছে।")
     show_admin_dashboard(message.chat.id)
 
 def save_bot_username(message):
@@ -1203,11 +1203,11 @@ def check_and_send_otp_manual(chat_id, selected_app, country, num):
     try:
         res = requests.get(url, headers=get_api_headers(), timeout=15).json()
         if res.get("meta", {}).get("status") == "ok":
-            otps_list = res.get("data", {}).get("otps", [])
+            text_otps_list = res.get("data", {}).get("otps", [])
             clean_num = str(num).replace("+", "").strip()
             
             found_msg = None
-            for item in otps_list:
+            for item in text_otps_list:
                 item_num = str(item.get("number")).replace("+", "").strip()
                 if item_num == clean_num or clean_num.endswith(item_num) or item_num.endswith(clean_num):
                     found_msg = item.get("message") or item.get("sms")
@@ -1421,10 +1421,11 @@ def process_withdraw_address(message, method, amount):
     db.update_user_balance(chat_id, -amount)
     
     req_id = f"wd_{int(time.time())}_{chat_id}"
+    username_raw = message.from_user.username or "N/A"
     req_data = {
         "id": req_id,
         "user_id": chat_id,
-        "username": message.from_user.username or "N/A",
+        "username": username_raw,
         "method": method,
         "amount": amount,
         "address": address,
@@ -1438,13 +1439,20 @@ def process_withdraw_address(message, method, amount):
     markup.row(types.InlineKeyboardButton("📢 Payment Channel", url="https://t.me/SHS_Otp_Channel"))
     markup.row(types.InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{config.get('DEV_USERNAME', 'Saku_143')}"))
     
-    bot.send_message(chat_id, 
-                     f"⏱ **উইথড্র রিকোয়েস্ট প্রসেসিং-এ রয়েছে!**\n\n"
-                     f"💸 পরিমাণ: `{amount} BDT`\n"
-                     f"📱 মেথড: `{method.upper()}`\n"
-                     f"📌 অ্যাড্রেস / আইডি: `{address}`\n\n"
-                     f"আপনার উইথড্র প্রসেসিং এ আছে। পেমেন্ট আপডেট পেতে পেমেন্ট চ্যানেল এ নজর রাখুন, কিছুক্ষণের মধ্যে প্রদান করা হবে।", 
-                     reply_markup=markup, parse_mode="Markdown")
+    # আকর্ষণীয় ও মানানসই নোটিফিকেশন মেসেজ সেট করা হলো
+    user_confirm_text = (
+        f"⏱ **উইথড্র রিকোয়েস্ট প্রসেসিং-এ রয়েছে!** ⏱\n\n"
+        f"💖 **প্রিয় গ্রাহক,** আপনার পেমেন্ট রিকোয়েস্টটি সফলভাবে আমাদের সিস্টেমে প্রসেসিং এ যুক্ত হয়েছে। "
+        f"খুব শীঘ্রই এডমিন প্যানেল থেকে আপনার অ্যাকাউন্ট চেক করে পেমেন্ট পাঠিয়ে দেওয়া হবে। "
+        f"পেমেন্ট সফল হওয়ার সাথে সাথে আপডেট পেতে দয়া করে আমাদের পেমেন্ট চ্যানেলে চোখ রাখুন। ✨\n\n"
+        f"📊 **উইথড্র বিবরণী:**\n"
+        f" ├ 💰 পরিমাণ: `{amount:.2f} BDT`\n"
+        f" ├ 📱 পেমেন্ট মেথড: `{method.upper()}`\n"
+        f" └ 📌 অ্যাকাউন্ট / আইডি: `{address}`\n\n"
+        f"🔔 **পেমেন্ট সংক্রান্ত যেকোনো আপডেটের জন্য নিচে চোখ রাখুন!** 👇"
+    )
+    
+    bot.send_message(chat_id, user_confirm_text, reply_markup=markup, parse_mode="Markdown")
     
     # অ্যাডমিন প্যানেলে এপ্রুভাল রিকুয়েস্ট পাঠানো (এটি কেবল অ্যাডমিন দেখতে পাবেন)
     admin_markup = types.InlineKeyboardMarkup()
@@ -1452,8 +1460,11 @@ def process_withdraw_address(message, method, amount):
         types.InlineKeyboardButton("✅ Approve", callback_data=f"approve_wd_{req_id}"),
         types.InlineKeyboardButton("❌ Reject", callback_data=f"reject_wd_{req_id}")
     )
+    
+    # আন্ডারস্কোরজনিত টেলিগ্রাম মার্কডাউন ইরর এড়াতে ইউজারনেম ফিল্টার
+    safe_username = str(username_raw).replace("_", "\\_")
     admin_text = (f"📥 **নতুন উইথড্র রিকোয়েস্ট এসেছে!**\n\n"
-                  f"👤 ইউজার: `{chat_id}` (@{req_data['username']})\n"
+                  f"👤 ইউজার আইডি: `{chat_id}` (Username: @{safe_username})\n"
                   f"💰 পরিমাণ: `{amount} BDT`\n"
                   f"📱 মেথড: `{method.upper()}`\n"
                   f"📌 অ্যাড্রেস: `{address}`\n"
