@@ -63,6 +63,29 @@ class DatabaseManager:
             self._save_local()
         return self.local_data["users"][uid]
 
+    def get_all_user_ids(self):
+        uids = set()
+        # Firebase থেকে ইউজারদের আইডি রিকোয়েস্ট করা হচ্ছে যাতে ডাটা না হারায়
+        if self.db_url:
+            try:
+                res = requests.get(f"{self.db_url}/users.json", timeout=10)
+                if res.status_code == 200 and res.json() is not None:
+                    for k in res.json().keys():
+                        try:
+                            uids.add(int(k))
+                        except:
+                            pass
+            except Exception as e:
+                print(f"Firebase get_all_user_ids error: {e}")
+        
+        # লোকাল ব্যাকআপের ডাটা মার্জ করা হচ্ছে
+        for k in self.local_data.get("users", {}).keys():
+            try:
+                uids.add(int(k))
+            except:
+                pass
+        return uids
+
     def save_user(self, user_id, data):
         uid = str(user_id)
         if self.db_url:
@@ -133,26 +156,8 @@ class DatabaseManager:
         return self.local_data["withdraws"].get(r_id)
 
 def load_users():
-    if os.path.exists(USERS_FILE):
-        try:
-            with open(USERS_FILE, "r") as f:
-                content = f.read().strip()
-                if not content:
-                    return set()
-                data = json.loads(content)
-                users = set()
-                for uid in data:
-                    try:
-                        val = int(uid)
-                        if val > 0: 
-                            users.add(val)
-                    except (ValueError, TypeError):
-                        pass
-                return users
-        except Exception as e:
-            print(f"Error loading users: {e}")
-            return set()
-    return set()
+    # সরাসরি ডাটাবেজ থেকে ডাটা লোড করায় রিসেট খেলেও মেমোরি ডাটা অক্ষুণ্ন থাকবে
+    return db.get_all_user_ids()
 
 def save_users(users_set):
     try:
@@ -425,6 +430,8 @@ def track_user(user_id):
         if u_id > 0:  
             if u_id not in all_users:
                 all_users.add(u_id)
+                # ডাটাবেজ সুরক্ষার জন্য তাৎক্ষণিক প্রোফাইল তৈরি নিশ্চিত করা
+                db.get_user(u_id)
                 save_users(all_users)
     except:
         pass
@@ -652,13 +659,16 @@ def send_available_countries(chat_id):
             msg += f"{s_info['name']} ➔ {rids_str}\n"
     bot.send_message(chat_id, msg, parse_mode="Markdown")
 
-# --- ড্যাশবোর্ড স্ক্রিন (বট অন/অফ স্টেটাসসহ) ---
+# --- ড্যাশবোর্ড স্ক্রিন (বট অন/অফ স্ট্যাটাস ও নতুন এডিট ব্যালেন্স বোতামসহ) ---
 def show_admin_dashboard(chat_id):
     markup = types.InlineKeyboardMarkup()
     
     # বট অন/অফ স্ট্যাটাস বাটন
     bot_status_label = "🤖 Bot Status: ✅ ON" if config.get("BOT_STATUS", "ON") == "ON" else "🤖 Bot Status: ❌ OFF"
     markup.row(types.InlineKeyboardButton(bot_status_label, callback_data="adm_toggle_bot_status"))
+    
+    # ব্যালেন্স এডিট বোতাম
+    markup.row(types.InlineKeyboardButton("💰 Edit User Balance", callback_data="adm_edituserbal"))
     
     markup.row(types.InlineKeyboardButton("➕ Add Range ID", callback_data="adm_addrid"),
                types.InlineKeyboardButton("✨ Add Custom App", callback_data="adm_addcustom"))
@@ -708,6 +718,10 @@ def handle_admin_callbacks(call):
             try: bot.delete_message(chat_id, call.message.message_id)
             except: pass
             show_admin_dashboard(chat_id)
+            
+    elif data == "adm_edituserbal":
+        msg = bot.send_message(chat_id, "👤 **ইউজারের ব্যালেন্স পরিবর্তন করতে তার Telegram ID দিন:**")
+        bot.register_next_step_handler(msg, process_admin_get_user_id)
             
     elif data == "adm_addrid":
         markup = types.InlineKeyboardMarkup()
@@ -771,6 +785,55 @@ def handle_admin_callbacks(call):
         try: bot.delete_message(chat_id, call.message.message_id)
         except: pass
         show_admin_dashboard(chat_id)
+
+# --- ইউজার ব্যালেন্স পরিবর্তন লজিক ---
+def process_admin_get_user_id(message):
+    chat_id = message.chat.id
+    try:
+        target_uid = int(message.text.strip())
+        user_data = db.get_user(target_uid)
+        current_bal = user_data.get("balance", 0.0)
+        
+        msg = bot.send_message(chat_id, 
+                               f"👤 **ইউজার আইডি:** `{target_uid}`\n"
+                               f"💰 **বর্তমান ব্যালেন্স:** `{current_bal} BDT`\n\n"
+                               f"ব্যালেন্স পরিবর্তন করার জন্য পরিমাণটি লিখুন:\n"
+                               f"• টাকা বাড়াতে সরাসরি সংখ্যাটি লিখুন (যেমন: `10`)\n"
+                               f"• টাকা কমাতে বিয়োগ চিহ্নসহ লিখুন (যেমন: `-5`):")
+        bot.register_next_step_handler(msg, process_admin_save_user_balance, target_uid)
+    except ValueError:
+        bot.send_message(chat_id, "❌ অনুগ্রহ করে একটি সঠিক সংখ্যামূলক ইউজার আইডি দিন।")
+        show_admin_dashboard(chat_id)
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ সমস্যা হয়েছে: {e}")
+        show_admin_dashboard(chat_id)
+
+def process_admin_save_user_balance(message, target_uid):
+    chat_id = message.chat.id
+    try:
+        amount_diff = float(message.text.strip())
+        user_data = db.get_user(target_uid)
+        old_bal = float(user_data.get("balance", 0.0))
+        
+        new_bal = db.update_user_balance(target_uid, amount_diff)
+        
+        bot.send_message(chat_id, f"✅ **ব্যালেন্স আপডেট সফল!**\n\n• ইউজার: `{target_uid}`\n• পূর্বের ব্যালেন্স: `{old_bal} BDT`\n• নতুন ব্যালেন্স: `{new_bal} BDT`")
+        
+        # পরিবর্তন সম্পর্কে ব্যবহারকারীকে সংকেত প্রেরণ
+        try:
+            bot.send_message(target_uid, 
+                             f"💰 **আপনার ব্যালেন্স অ্যাডমিন কর্তৃক আপডেট করা হয়েছে!**\n\n"
+                             f"• পূর্বের ব্যালেন্স: `{old_bal} BDT`\n"
+                             f"• নতুন ব্যালেন্স: `{new_bal} BDT`\n"
+                             f"• পরিবর্তিত পরিমাণ: `{'++' if amount_diff >= 0 else ''}{amount_diff} BDT`", 
+                             parse_mode="Markdown")
+        except:
+            pass
+    except ValueError:
+        bot.send_message(chat_id, "❌ অনুগ্রহ করে একটি সঠিক সংখ্যা দিন (যেমন: 10 বা -5)।")
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ পরিবর্তন ব্যর্থ হয়েছে: {e}")
+    show_admin_dashboard(chat_id)
 
 # --- বট অফ করার কারণ সংরক্ষণের ধাপ ---
 def process_bot_turn_off_reason(message):
@@ -1196,6 +1259,9 @@ def check_and_send_otp_manual(chat_id, selected_app, country, num):
                 
                 for dest_id in config.get("OTP_DESTINATIONS", []):
                     try:
+                        # পেমেন্ট চ্যানেলে ওটিপি সেন্ডিং সম্পূর্ণ ব্লক করা হচ্ছে
+                        if str(dest_id).strip() == "-1003956226642":
+                            continue
                         bot.send_message(int(dest_id), alert_text, reply_markup=group_markup, parse_mode="Markdown")
                     except: pass
                 return True
@@ -1273,6 +1339,9 @@ def background_user_otp_watcher(chat_id, message_id, selected_app, country, num)
                     
                     for dest_id in config.get("OTP_DESTINATIONS", []):
                         try:
+                            # পেমেন্ট চ্যানেলে ওটিপি সেন্ডিং সম্পূর্ণ ব্লক করা হচ্ছে
+                            if str(dest_id).strip() == "-1003956226642":
+                                continue
                             bot.send_message(int(dest_id), alert_text, reply_markup=group_markup, parse_mode="Markdown")
                         except: pass
                     return
@@ -1551,6 +1620,9 @@ def background_live_sms_monitor():
                             
                             for dest_id in config.get("OTP_DESTINATIONS", []):
                                 try:
+                                    # পেমেন্ট চ্যানেলে ওটিপি সেন্ডিং সম্পূর্ণ ব্লক করা হচ্ছে
+                                    if str(dest_id).strip() == "-1003956226642":
+                                        continue
                                     bot.send_message(int(dest_id), speed_alert, parse_mode="Markdown")
                                 except: pass
                                 
@@ -1585,6 +1657,9 @@ def background_live_sms_monitor():
                     
                     for dest_id in config.get("OTP_DESTINATIONS", []):
                         try:
+                            # পেমেন্ট চ্যানেলে ওটিপি সেন্ডিং সম্পূর্ণ ব্লক করা হচ্ছে
+                            if str(dest_id).strip() == "-1003956226642":
+                                continue
                             bot.send_message(int(dest_id), live_alert, reply_markup=markup, parse_mode="Markdown")
                         except: pass
         except:
