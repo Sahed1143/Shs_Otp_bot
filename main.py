@@ -304,13 +304,15 @@ def load_config():
         "FIREBASE_DB_URL": "https://shsotpbot-default-rtdb.firebaseio.com/",
         "BALANCE_TEXT": "💰 ওটিপি রিসিভ করে টাকা ইনকাম করুন! প্রতি সফল ওটিপিতে পাবেন ০.১০ টাকা।",
         "WITHDRAW_TEXT": "📉 মিনিমাম উইথড্র ৫০ টাকা। পেমেন্ট গেটওয়েগুলো চেক করুন।",
+        "BOT_STATUS": "ON",
+        "BOT_OFF_REASON": "",
         "PAYMENT_SETTINGS": {
             "bkash": True,
             "nagad": True,
             "binance": True
         },
         "CHANNELS_TO_JOIN": [
-            {"id": "-1003956226642", "link": "https://t.me/SHS_Otp_Channel", "name": "📢 Otp Channel"},
+            {"id": "-1003956226642", "link": "https://t.me/SHS_Otp_Channel", "name": "📢 Payment Channel"},
             {"id": "-1002183552076", "link": "https://t.me/winfanti", "name": "💬 Support Channel"}
         ],
         "GROUPS_TO_JOIN": [
@@ -341,6 +343,10 @@ def load_config():
                     loaded["BASE_URL"] = default_config["BASE_URL"]
                 if "PAYMENT_SETTINGS" not in loaded:
                     loaded["PAYMENT_SETTINGS"] = default_config["PAYMENT_SETTINGS"]
+                if "BOT_STATUS" not in loaded:
+                    loaded["BOT_STATUS"] = "ON"
+                if "BOT_OFF_REASON" not in loaded:
+                    loaded["BOT_OFF_REASON"] = ""
                 return loaded
         except:
             return default_config
@@ -365,17 +371,44 @@ app = Flask('')
 admin_temp_data = {}
 all_users = load_users()
 
+# --- Bot On/Off Check & User Tracking Middleware ---
 @bot.middleware_handler(update_types=['message', 'callback_query'])
-def auto_track_user(bot_instance, package):
+def auto_track_and_check_status(bot_instance, package):
     try:
+        user_id = None
         if hasattr(package, 'from_user') and package.from_user:
-            track_user(package.from_user.id)
+            user_id = package.from_user.id
+            track_user(user_id)
         elif hasattr(package, 'chat') and package.chat:
-            track_user(package.chat.id)
+            user_id = package.chat.id
+            track_user(user_id)
         elif hasattr(package, 'message') and package.message and package.message.chat:
-            track_user(package.message.chat.id)
+            user_id = package.message.chat.id
+            track_user(user_id)
+            
+        # বট যদি অফ থাকে তবে সাধারণ ব্যবহারকারীদের জন্য অ্যাক্সেস ব্লক করার লজিক
+        if config.get("BOT_STATUS", "ON") == "OFF":
+            # অ্যাডমিন সব সময় অ্যাক্সেস পাবেন
+            if user_id and int(user_id) == int(config["ADMIN_ID"]):
+                return
+            
+            # শুধুমাত্র প্রাইভেট চ্যাটে রেসপন্স ব্লক হবে, গ্রুপে নয়
+            is_private = False
+            if hasattr(package, 'chat') and package.chat and package.chat.type == 'private':
+                is_private = True
+            elif hasattr(package, 'message') and package.message and package.message.chat and package.message.chat.type == 'private':
+                is_private = True
+                
+            if is_private:
+                reason = config.get("BOT_OFF_REASON", "রক্ষণাবেক্ষণ কাজের জন্য বট সাময়িকভাবে বন্ধ আছে।")
+                text = f"⚠️ **বটটি বর্তমানে বন্ধ রয়েছে!**\n\n💬 **অফ করার কারণ:**\n`{reason}`"
+                if isinstance(package, types.CallbackQuery):
+                    bot.answer_callback_query(package.id, text=f"❌ বট বর্তমানে বন্ধ আছে! কারণ: {reason}", show_alert=True)
+                else:
+                    bot.send_message(user_id, text, parse_mode="Markdown")
+                return telebot.handler_backends.CancelUtility()
     except Exception as e:
-        print(f"Error in tracking middleware: {e}")
+        print(f"Error in status/tracking middleware: {e}")
 
 def os_alive(): return "Live & Active"
 
@@ -422,7 +455,7 @@ def format_rid(rid):
         return rid_str[:-3]
     return rid_str
 
-# সফল ওটিপিতে নম্বরের মাস্কিং ফরম্যাট (প্রথম ৫ এবং লাস্টের ২ দেখা যাবে, মাঝে XX থাকবে)
+# সফল ওটিপিতে নম্বরের মাস্কিং ফরম্যাট
 def format_otp_phone_number(num):
     num_str = str(num).replace("+", "").strip()
     if len(num_str) < 8:
@@ -431,7 +464,7 @@ def format_otp_phone_number(num):
     last_part = num_str[-2:]
     return f"+{first_part}XXXXXX{last_part}"
 
-# ব্যালেন্স রিওয়ার্ড লজিক (প্রতিটি ওটিপি রিসিভে ০.১০ BDT, একবারের বেশি পাবেন না)
+# ব্যালেন্স রিওয়ার্ড লজিক
 def reward_user_for_otp(user_id, phone_number):
     clean_num = str(phone_number).replace("+", "").strip()
     if db.has_number_received_otp(clean_num):
@@ -542,12 +575,11 @@ def handle_text(message):
                     f"{config.get('BALANCE_TEXT', '')}")
         bot.send_message(message.chat.id, bal_text, parse_mode="Markdown")
     elif text == "📉 Withdraw":
+        # উইথড্র-তে ক্লিক করলে সরাসরি অ্যামাউন্ট লেখার নোটিফিকেশন দেবে
         user_data = db.get_user(message.chat.id)
         bal = user_data.get("balance", 0.0)
-        if bal < 50.0:
-            bot.send_message(message.chat.id, f"❌ **উইথড্র ব্যর্থ!**\n\nআপনার ব্যালেন্স: `{bal} BDT`\nমিনিমাম উইথড্র অ্যামাউন্ট হচ্ছে **৫০ টাকা**। অনুগ্রহ করে আরও ওটিপি রিসিভ করে ব্যালেন্স বাড়ান।", parse_mode="Markdown")
-            return
-        show_withdraw_methods(message.chat.id)
+        msg = bot.send_message(message.chat.id, f"💰 **উইথড্র করার পরিমাণ (BDT) লিখুন:**\n\n• আপনার বর্তমান ব্যালেন্স: `{bal} BDT`\n• মিনিমাম উইথড্র: `50 BDT`")
+        bot.register_next_step_handler(msg, process_withdraw_amount)
     elif text == "🌍 Available Countries":
         send_available_countries(message.chat.id)
     elif text == "🔐 2FA GENERATE":
@@ -555,29 +587,34 @@ def handle_text(message):
     elif text == "🛠 Admin Dashboard" and message.chat.id == int(config["ADMIN_ID"]):
         show_admin_dashboard(message.chat.id)
 
-def show_withdraw_methods(chat_id, message_id=None):
+# --- উইথড্র গেটওয়ে অন/অফ রেন্ডারার (ক্র্যাশ সুরক্ষাসহ) ---
+def render_payment_toggle(chat_id, message_id=None):
+    settings = config.get("PAYMENT_SETTINGS", {"bkash": True, "nagad": True, "binance": True})
     markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("📱 bKash", callback_data="user_wd_bkash"))
-    markup.add(types.InlineKeyboardButton("📱 Nagad", callback_data="user_wd_nagad"))
-    markup.add(types.InlineKeyboardButton("💳 Binance", callback_data="user_wd_binance"))
-    markup.add(types.InlineKeyboardButton("⬅️ Back to Main", callback_data="back_main"))
     
-    text = "📉 **উইথড্র সিস্টেম**\n\nপেমেন্ট নেওয়ার জন্য নিচের যেকোনো একটি মেথড সিলেক্ট করুন (মিনিমাম ৫০ টাকা):"
+    b_status = "✅ ON" if settings.get("bkash", True) else "❌ OFF"
+    n_status = "✅ ON" if settings.get("nagad", True) else "❌ OFF"
+    bi_status = "✅ ON" if settings.get("binance", True) else "❌ OFF"
+    
+    markup.add(types.InlineKeyboardButton(f"bKash: {b_status}", callback_data="toggle_pay_bkash"))
+    markup.add(types.InlineKeyboardButton(f"Nagad: {n_status}", callback_data="toggle_pay_nagad"))
+    markup.add(types.InlineKeyboardButton(f"Binance: {bi_status}", callback_data="toggle_pay_binance"))
+    markup.add(types.InlineKeyboardButton("⬅️ ব্যাক", callback_data="adm_back"))
+    
+    text = "⚙️ **উইথড্র গেটওয়ে অন/অফ করুন:**"
     if message_id:
-        try: bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, reply_markup=markup)
-        except: bot.send_message(chat_id, text, reply_markup=markup)
+        try: bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, reply_markup=markup, parse_mode="Markdown")
+        except: bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
     else:
-        bot.send_message(chat_id, text, reply_markup=markup)
+        bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
 
 def fetch_live_traffic(chat_id):
-    # সচল কান্ট্রি, রেঞ্জ এবং পারফরম্যান্স রেশিও (%) প্রদর্শন
     msg = "📊 **লাইভ ট্রাফিক ও একটিভ রেঞ্জ পারফরম্যান্স রিপোর্ট:**\n\n"
     msg += "এখানে সচল দেশ ও লাইভ রেঞ্জগুলোর বর্তমান পারফরম্যান্স (%) দেখানো হলো। বেশি % থাকা রেঞ্জ ব্যবহার করলে ওটিপি দ্রুত রিসিভ হবে:\n\n"
     
     services = config.get("SERVICES", {})
     active_count = 0
     
-    # প্রধান প্রধান সোশ্যাল ও ওটিপি সার্ভিসগুলো লুপ করে দেখাবো
     for s_id in ["whatsapp", "facebook", "telegram", "instagram", "imo", "tiktok"]:
         if s_id in services:
             s_info = services[s_id]
@@ -588,7 +625,6 @@ def fetch_live_traffic(chat_id):
                 clean_rid = format_rid(r_val)
                 if clean_rid in active_ranges_global:
                     score = get_country_activity_score(s_id, r_val)
-                    # বেস পারফরম্যান্স রেশিও হিসেব (বাস্তবধর্মী ৭8% থেকে ৯৯% পর্যন্ত ডাইনামিক দেখাবে)
                     base_pct = 80 + (abs(hash(country + s_id)) % 10)
                     pct = min(99, base_pct + score * 4)
                     active_list.append((country, r_val, pct))
@@ -596,7 +632,6 @@ def fetch_live_traffic(chat_id):
             if active_list:
                 active_count += 1
                 msg += f"*{s_info['name']}*:\n"
-                # পারফরম্যান্সের মান অনুযায়ী সর্টিং
                 active_list = sorted(active_list, key=lambda x: x[2], reverse=True)[:4]
                 for country, r_val, pct in active_list:
                     msg += f" ├ {country} (Range: `{r_val}`) ➔ ⚡ **{pct}% Active**\n"
@@ -617,8 +652,14 @@ def send_available_countries(chat_id):
             msg += f"{s_info['name']} ➔ {rids_str}\n"
     bot.send_message(chat_id, msg, parse_mode="Markdown")
 
+# --- ড্যাশবোর্ড স্ক্রিন (বট অন/অফ স্টেটাসসহ) ---
 def show_admin_dashboard(chat_id):
     markup = types.InlineKeyboardMarkup()
+    
+    # বট অন/অফ স্ট্যাটাস বাটন
+    bot_status_label = "🤖 Bot Status: ✅ ON" if config.get("BOT_STATUS", "ON") == "ON" else "🤖 Bot Status: ❌ OFF"
+    markup.row(types.InlineKeyboardButton(bot_status_label, callback_data="adm_toggle_bot_status"))
+    
     markup.row(types.InlineKeyboardButton("➕ Add Range ID", callback_data="adm_addrid"),
                types.InlineKeyboardButton("✨ Add Custom App", callback_data="adm_addcustom"))
     markup.row(types.InlineKeyboardButton("🗑 Delete Range ID", callback_data="adm_delrid"))
@@ -635,7 +676,6 @@ def show_admin_dashboard(chat_id):
     
     bot_title = config.get("BOT_NAME", "কোড এসেছে💋👇")
     bot_user = config.get("BOT_USERNAME", "SHS_SMSHUB_bot")
-    dev_user = config.get("DEV_USERNAME", "Saku_143")
     
     text = (f"🛠 **অ্যাডমিন কন্ট্রোল প্যানেল (Voltxsms)**\n\n"
             f"• Bot Name: `{bot_title}`\n"
@@ -644,7 +684,9 @@ def show_admin_dashboard(chat_id):
             f"• Total Users: `{len(all_users)}`\n"
             f"• API Key: `{config.get('FASTX_API_KEY', '')}`\n"
             f"• মোট সচল অ্যাপ: {len(config['SERVICES'])}\n"
-            f"• বর্তমান নোটিশ: {config.get('NOTICE', 'নেই')}")
+            f"• বর্তমান নোটিশ: {config.get('NOTICE', 'নেই')}\n"
+            f"• বট স্ট্যাটাস: `{config.get('BOT_STATUS', 'ON')}`\n"
+            f"• অফ করার কারণ: `{config.get('BOT_OFF_REASON', 'নেই')}`")
     bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("adm_"))
@@ -653,7 +695,21 @@ def handle_admin_callbacks(call):
     data = call.data
     chat_id = call.message.chat.id
     
-    if data == "adm_addrid":
+    if data == "adm_toggle_bot_status":
+        current_status = config.get("BOT_STATUS", "ON")
+        if current_status == "ON":
+            msg = bot.send_message(chat_id, "✍️ বটটি অফ করার কারণটি লিখে পাঠান (যেমন: 'নতুন আপডেট চলছে'):")
+            bot.register_next_step_handler(msg, process_bot_turn_off_reason)
+        else:
+            config["BOT_STATUS"] = "ON"
+            config["BOT_OFF_REASON"] = ""
+            save_config(config)
+            bot.answer_callback_query(call.id, text="✅ বট সফলভাবে অন করা হয়েছে!", show_alert=True)
+            try: bot.delete_message(chat_id, call.message.message_id)
+            except: pass
+            show_admin_dashboard(chat_id)
+            
+    elif data == "adm_addrid":
         markup = types.InlineKeyboardMarkup()
         for s_id, s_info in config["SERVICES"].items():
             markup.add(types.InlineKeyboardButton(f"➕ {s_info['name']} - এ রেঞ্জ যোগ করুন", callback_data=f"addrid_target_{s_id}"))
@@ -685,18 +741,7 @@ def handle_admin_callbacks(call):
         bot.edit_message_text(chat_id=chat_id, message_id=call.message.message_id, text=text, reply_markup=markup, parse_mode="Markdown")
 
     elif data == "adm_togglepay":
-        settings = config.get("PAYMENT_SETTINGS", {"bkash": True, "nagad": True, "binance": True})
-        markup = types.InlineKeyboardMarkup()
-        
-        b_status = "✅ ON" if settings.get("bkash", True) else "❌ OFF"
-        n_status = "✅ ON" if settings.get("nagad", True) else "❌ OFF"
-        bi_status = "✅ ON" if settings.get("binance", True) else "❌ OFF"
-        
-        markup.add(types.InlineKeyboardButton(f"bKash: {b_status}", callback_data="toggle_pay_bkash"))
-        markup.add(types.InlineKeyboardButton(f"Nagad: {n_status}", callback_data="toggle_pay_nagad"))
-        markup.add(types.InlineKeyboardButton(f"Binance: {bi_status}", callback_data="toggle_pay_binance"))
-        markup.add(types.InlineKeyboardButton("⬅️ ব্যাক", callback_data="adm_back"))
-        bot.edit_message_text(chat_id=chat_id, message_id=call.message.message_id, text="⚙️ **উইথড্র গেটওয়ে অন/অফ করুন:**", reply_markup=markup)
+        render_payment_toggle(chat_id, call.message.message_id)
 
     elif data == "adm_broadcast":
         msg = bot.send_message(chat_id, "📢 আপনি সকল ইউজারদের কাছে যে মেসেজটি পাঠাতে চান তা লিখে বা ফরোয়ার্ড করে পাঠান:")
@@ -723,17 +768,33 @@ def handle_admin_callbacks(call):
         msg = bot.send_message(chat_id, "👉 আপনার নতুন Voltxsms API Key টি পাঠান:")
         bot.register_next_step_handler(msg, save_api_key)
     elif data == "adm_back":
+        try: bot.delete_message(chat_id, call.message.message_id)
+        except: pass
         show_admin_dashboard(chat_id)
+
+# --- বট অফ করার কারণ সংরক্ষণের ধাপ ---
+def process_bot_turn_off_reason(message):
+    chat_id = message.chat.id
+    reason_text = message.text.strip()
+    if not reason_text:
+        reason_text = "রক্ষণাবেক্ষণ কাজের জন্য বট সাময়িকভাবে বন্ধ রয়েছে।"
+    config["BOT_STATUS"] = "OFF"
+    config["BOT_OFF_REASON"] = reason_text
+    save_config(config)
+    bot.send_message(chat_id, f"❌ বট অফ (OFF) করা হয়েছে!\n💬 কারণ: {reason_text}")
+    show_admin_dashboard(chat_id)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("toggle_pay_"))
 def handle_payment_toggle(call):
+    if call.message.chat.id != int(config["ADMIN_ID"]): return
     method = call.data.replace("toggle_pay_", "")
     if "PAYMENT_SETTINGS" not in config:
         config["PAYMENT_SETTINGS"] = {"bkash": True, "nagad": True, "binance": True}
     config["PAYMENT_SETTINGS"][method] = not config["PAYMENT_SETTINGS"].get(method, True)
     save_config(config)
     bot.answer_callback_query(call.id, text=f"✅ {method.upper()} পরিবর্তন করা হয়েছে!")
-    handle_admin_callbacks(call.__class__(id=call.id, message=call.message, data="adm_togglepay", from_user=call.from_user))
+    # ক্র্যাশ এড়াতে সরাসরি সেফ রেন্ডারিং কল করা হলো
+    render_payment_toggle(call.message.chat.id, call.message.message_id)
 
 def save_firebase_url(message):
     config["FIREBASE_DB_URL"] = message.text.strip()
@@ -915,7 +976,7 @@ def save_balance_text(message):
 def save_withdraw_text(message):
     config["WITHDRAW_TEXT"] = message.text.strip()
     save_config(config)
-    bot.send_message(message.chat.id, "✅ ওটিপি আপডেট হয়েছে।")
+    bot.send_message(message.chat.id, "✅ উইথড্র টেক্সট আপডেট হয়েছে।")
     show_admin_dashboard(message.chat.id)
 
 def save_bot_username(message):
@@ -968,7 +1029,7 @@ def show_others_page(call):
     except:
         bot.send_message(chat_id=call.message.chat.id, text=text, reply_markup=markup, parse_mode="Markdown")
 
-# --- ডাইনামিক কান্ট্রি ও সচল স্টক ট্র্যাকিং শো করা ---
+# --- ডাইনামিক কান্ট্রি শো করা (আউট অফ স্টক কান্ট্রি হাইড রাখা হয়েছে) ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("app_"))
 def show_countries(call):
     selected_app = call.data.split("_")[1]
@@ -978,38 +1039,29 @@ def show_countries(call):
     rids = services[selected_app]["rids"]
     
     available_countries = []
-    oos_countries = []
     
-    # রিয়েলটাইম লাইভ এপিআই স্টক ভেরিফিকেশন লজিক
+    # লাইভ স্টক ট্র্যাকিং ফিল্টারিং
     for country, r_val in rids.items():
         clean_rid = format_rid(r_val)
-        # যদি গ্লোবাল লাইভ সেট-এ রেঞ্জটি থাকে তবে তা সচল
+        # স্টক থাকলে কেবল ট্র্যাকিং সেটে যুক্ত হবে
         is_available = clean_rid in active_ranges_global or not active_ranges_global
         if is_available:
             available_countries.append(country)
-        else:
-            oos_countries.append(country)
             
-    # সচল কান্ট্রিগুলোকে ট্রাফিক স্কোর অনুযায়ী সর্টিং করে সামনে রাখা
+    # সচল কান্ট্রিগুলোকে সর্ট করে ট্রাফিক স্কোর অনুযায়ী প্রদর্শন
     available_countries = sorted(
         available_countries,
         key=lambda c: (get_country_activity_score(selected_app, rids[c]), c),
         reverse=True
     )
     
-    sorted_countries = [(c, True) for c in available_countries] + [(c, False) for c in oos_countries]
-    
     row = []
-    for country, available in sorted_countries:
+    for country in available_countries:
         score = get_country_activity_score(selected_app, rids[country])
-        if available:
-            badge = "🔥 " if score > 0 else "⭐ "
-            callback_data = f"c_{country}_{selected_app}"
-            btn_text = f"{badge}{country}"
-        else:
-            btn_text = f"🔴 {country} (Stock Out)"
-            callback_data = f"oos_{country}_{selected_app}"
-            
+        badge = "🔥 " if score > 0 else "⭐ "
+        callback_data = f"c_{country}_{selected_app}"
+        btn_text = f"{badge}{country}"
+        
         row.append(types.InlineKeyboardButton(btn_text, callback_data=callback_data))
         if len(row) == 2:
             markup.row(*row)
@@ -1017,10 +1069,6 @@ def show_countries(call):
     if row: markup.row(*row)
     markup.add(types.InlineKeyboardButton("⬅️ Back", callback_data="back_services"))
     bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=f"🌍 **{selected_app.upper()} এর জন্য দেশ সিলেক্ট করুন:**", reply_markup=markup, parse_mode="Markdown")
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("oos_"))
-def handle_oos_click(call):
-    bot.answer_callback_query(call.id, text="❌ দুঃখিত, এই দেশের নম্বর বর্তমানে আউট অফ স্টক! নতুন রেঞ্জ প্যানেলে আসলে আবার সচল হবে।", show_alert=True)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("c_"))
 def request_number(call):
@@ -1106,16 +1154,13 @@ def check_and_send_otp_manual(chat_id, selected_app, country, num):
                 current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 bot_title = config.get("BOT_NAME", "কোড এসেছে💋👇")
                 bot_user = config.get("BOT_USERNAME", "SHS_SMSHUB_bot")
-                dev_user = config.get("DEV_USERNAME", "Saku_143")
                 
                 code_match = re.search(r'\b\d{4,8}\b', found_msg)
                 isolated_code = code_match.group(0) if code_match else found_msg[:10]
                 
-                # রিওয়ার্ড ক্যালকুলেট
                 rewarded, new_bal = reward_user_for_otp(chat_id, num)
                 reward_text = f"💰 **Earned:** +0.10 BDT (New Bal: `{new_bal} BDT`)" if rewarded else "ℹ️ *এই নম্বরের রিওয়ার্ড ইতোমধ্যে যোগ হয়েছে।*"
                 
-                # মাস্কড ফোন নাম্বার
                 masked_num = format_otp_phone_number(num)
                 
                 alert_text = (f"🤖 **{bot_title}**\n"
@@ -1234,52 +1279,71 @@ def background_user_otp_watcher(chat_id, message_id, selected_app, country, num)
         except:
             pass
 
-# --- উইথড্র প্রসেসিং ফ্লো ---
-@bot.callback_query_handler(func=lambda call: call.data.startswith("user_wd_"))
-def process_user_withdraw_method(call):
-    method = call.data.replace("user_wd_", "")
-    settings = config.get("PAYMENT_SETTINGS", {"bkash": True, "nagad": True, "binance": True})
-    
-    if not settings.get(method, True):
-        active_methods = [k.upper() for k, v in settings.items() if v]
-        active_str = ", ".join(active_methods) if active_methods else "কোনোটিই নয়"
-        bot.answer_callback_query(call.id, text=f"⚠️ বর্তমানে {method.upper()} উইথড্র বন্ধ আছে। দয়া করে {active_str} এ উইথড্র করুন।", show_alert=True)
-        return
-        
-    user_data = db.get_user(call.message.chat.id)
-    bal = user_data.get("balance", 0.0)
-    if bal < 50.0:
-        bot.answer_callback_query(call.id, text="❌ মিনিমাম ৫০ টাকা ব্যালেন্স থাকা প্রয়োজন!", show_alert=True)
-        return
-        
-    msg = bot.send_message(call.message.chat.id, f"💰 **উইথড্র করার পরিমাণ (BDT) লিখুন:**\n\n• বর্তমান ব্যালেন্স: `{bal} BDT`\n• মিনিমাম উইথড্র: `50 BDT`")
-    bot.register_next_step_handler(msg, process_withdraw_amount, method)
-
-def process_withdraw_amount(message, method):
+# --- নতুন উইথড্র সিস্টেম অ্যামাউন্ট প্রসেসিং ---
+def process_withdraw_amount(message):
     chat_id = message.chat.id
     try:
         amount = float(message.text.strip())
         user_data = db.get_user(chat_id)
-        bal = user_data.get("balance", 0.0)
+        bal = float(user_data.get("balance", 0.0))
         
         if amount < 50.0:
-            bot.send_message(chat_id, "❌ মিনিমাম উইথড্র অ্যামাউন্ট ৫০ টাকা। দয়া করে আবার টাইপ করুন।")
-            return
-        if amount > bal:
-            bot.send_message(chat_id, f"❌ অপর্যাপ্ত ব্যালেন্স! আপনার সর্বোচ্চ ব্যালেন্স `{bal} BDT`।")
+            bot.send_message(chat_id, "❌ **উইথড্র ব্যর্থ!**\n\nমিনিমাম উইথড্র অ্যামাউন্ট হচ্ছে **৫০ টাকা**। অনুগ্রহ করে আবার ট্রাই করুন।")
             return
             
-        msg = bot.send_message(chat_id, f"👉 আপনার **{method.upper()}** নম্বর / ওয়ালেট অ্যাড্রেস দিন:")
-        bot.register_next_step_handler(msg, process_withdraw_address, method, amount)
+        if amount > bal:
+            # পর্যাপ্ত ব্যালেন্স না থাকলে বর্তমান ব্যালেন্স দেখাবে এবং উইথড্র বাতিল করবে
+            bot.send_message(chat_id, f"❌ **উত্তোলন করার মতো পর্যাপ্ত ব্যালেন্স নেই!**\n\n• আপনার বর্তমান ব্যালেন্স: `{bal} BDT`\n• আপনি তুলতে চেয়েছেন: `{amount} BDT`\n\nঅনুগ্রহ করে আরও ওটিপি রিসিভ করে ব্যালেন্স বাড়ান।", parse_mode="Markdown")
+            return
+            
+        # পর্যাপ্ত ব্যালেন্স থাকলে সচল উইথড্র গেটওয়েগুলো দেখাবে
+        settings = config.get("PAYMENT_SETTINGS", {"bkash": True, "nagad": True, "binance": True})
+        markup = types.InlineKeyboardMarkup()
+        
+        has_active_method = False
+        if settings.get("bkash", True):
+            markup.add(types.InlineKeyboardButton("📱 bKash", callback_data=f"usrwd_bkash_{amount}"))
+            has_active_method = True
+        if settings.get("nagad", True):
+            markup.add(types.InlineKeyboardButton("📱 Nagad", callback_data=f"usrwd_nagad_{amount}"))
+            has_active_method = True
+        if settings.get("binance", True):
+            markup.add(types.InlineKeyboardButton("💳 Binance", callback_data=f"usrwd_binance_{amount}"))
+            has_active_method = True
+            
+        if not has_active_method:
+            bot.send_message(chat_id, "❌ দুঃখিত, বর্তমানে সকল উইথড্র গেটওয়ে সাময়িকভাবে বন্ধ আছে।")
+            return
+            
+        bot.send_message(chat_id, f"📉 **উইথড্র গেটওয়ে সিলেক্ট করুন:**\n\n• উত্তোলন করার পরিমাণ: `{amount} BDT`\n\nনিচের সচল গেটওয়েগুলোর যেকোনো একটি সিলেক্ট করুন:", reply_markup=markup, parse_mode="Markdown")
     except ValueError:
         bot.send_message(chat_id, "❌ অনুগ্রহ করে একটি সঠিক সংখ্যা দিন (যেমন: 50)।")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("usrwd_"))
+def handle_user_withdraw_selection(call):
+    parts = call.data.split("_")
+    method = parts[1]
+    amount = float(parts[2])
+    chat_id = call.message.chat.id
+    
+    settings = config.get("PAYMENT_SETTINGS", {"bkash": True, "nagad": True, "binance": True})
+    if not settings.get(method, True):
+        bot.answer_callback_query(call.id, text=f"⚠️ দুঃখিত, বর্তমানে {method.upper()} গেটওয়ে বন্ধ করা হয়েছে। অন্য মেথড ব্যবহার করুন।", show_alert=True)
+        return
+        
+    try: bot.delete_message(chat_id, call.message.message_id)
+    except: pass
+    
+    prompt_text = "Binance ID" if method == "binance" else f"{method.capitalize()} Personal Number"
+    msg = bot.send_message(chat_id, f"👉 আপনার **{method.upper()}** {prompt_text} দিন:")
+    bot.register_next_step_handler(msg, process_withdraw_address, method, amount)
 
 def process_withdraw_address(message, method, amount):
     chat_id = message.chat.id
     address = message.text.strip()
     
     user_data = db.get_user(chat_id)
-    bal = user_data.get("balance", 0.0)
+    bal = float(user_data.get("balance", 0.0))
     if amount > bal:
         bot.send_message(chat_id, "❌ ব্যালেন্স সংক্রান্ত অমিল! উইথড্র বাতিল করা হলো।")
         return
@@ -1300,7 +1364,7 @@ def process_withdraw_address(message, method, amount):
     }
     db.save_withdraw(req_id, req_data)
     
-    # ইউজার ইন্টারফেস নোটিফিকেশন
+    # ইউজার ইন্টারফেস নোটিফিকেশন (পেমেন্ট চ্যানেল এবং কন্টাক্ট এডমিন বাটনসহ)
     markup = types.InlineKeyboardMarkup()
     markup.row(types.InlineKeyboardButton("📢 Payment Channel", url="https://t.me/SHS_Otp_Channel"))
     markup.row(types.InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{config.get('DEV_USERNAME', 'Saku_143')}"))
@@ -1309,11 +1373,11 @@ def process_withdraw_address(message, method, amount):
                      f"⏱ **উইথড্র রিকোয়েস্ট প্রসেসিং-এ রয়েছে!**\n\n"
                      f"💸 পরিমাণ: `{amount} BDT`\n"
                      f"📱 মেথড: `{method.upper()}`\n"
-                     f"📌 অ্যাড্রেস: `{address}`\n\n"
-                     f"আপনার উইথড্র প্রসেসিং এ আছে কিছুক্ষণের মধ্যে প্রদান করা হবে পেমেন্ট চ্যানেল এ চোখ রাখুন। কোনো সমস্যা হলে বা পেমেন্ট না পেয়ে থাকলে এডমিনকে জানান।", 
+                     f"📌 অ্যাড্রেস / আইডি: `{address}`\n\n"
+                     f"আপনার উইথড্র প্রসেসিং এ আছে। পেমেন্ট আপডেট পেতে পেমেন্ট চ্যানেল এ নজর রাখুন, কিছুক্ষণের মধ্যে প্রদান করা হবে।", 
                      reply_markup=markup, parse_mode="Markdown")
     
-    # অ্যাডমিন প্যানেলে এপ্রুভাল রিকুয়েস্ট পাঠানো
+    # অ্যাডমিন প্যানেলে এপ্রুভাল রিকুয়েস্ট পাঠানো (এটি কেবল অ্যাডমিন দেখতে পাবেন)
     admin_markup = types.InlineKeyboardMarkup()
     admin_markup.row(
         types.InlineKeyboardButton("✅ Approve", callback_data=f"approve_wd_{req_id}"),
@@ -1467,7 +1531,6 @@ def background_live_sms_monitor():
                     current_time_epoch = time.time()
                     country_name = get_country_info_by_range(range_val)
                     
-                    # --- হাই-স্পিড রেঞ্জ ডিটেকশন লজিক ---
                     key = (range_val, platform)
                     range_hits_tracker[key].append(current_time_epoch)
                     range_hits_tracker[key] = [t for t in range_hits_tracker[key] if current_time_epoch - t < 180]
@@ -1626,22 +1689,20 @@ def back_to_serv(call): send_services_menu(call.message.chat.id, call.message.me
 
 @bot.callback_query_handler(func=lambda call: call.data == "back_main")
 def back(call): 
-    bot.delete_message(call.message.chat.id, call.message.message_id)
+    try: bot.delete_message(call.message.chat.id, call.message.message_id)
+    except: pass
     send_home_keyboard(call.message.chat.id)
 
 @bot.callback_query_handler(func=lambda call: call.data == "check_membership")
 def check(call):
     if is_subscribed_all(call.from_user.id): 
-        try:
-            bot.delete_message(call.message.chat.id, call.message.message_id)
-        except:
-            pass
+        try: bot.delete_message(call.message.chat.id, call.message.message_id)
+        except: pass
         send_home_keyboard(call.message.chat.id, "✅ ভেরিфикации সফল! এখন থেকে সার্ভিস ব্যবহার করতে পারবেন।")
     else: 
         bot.answer_callback_query(call.id, text="❌ আপনি এখনো সমস্ত বাধ্যতামূলক চ্যানেল বা গ্রুপে জয়েন করেননি!", show_alert=True)
 
 if __name__ == "__main__":
-    # বটের স্টার্টআপ গতিশীল করা এবং প্রথম রানেই লাইভ স্টক অ্যাক্টিভেট করা
     print("⏳ লাইভ ট্রাফিক সিঙ্ক হচ্ছে...")
     sync_services_once()
     
