@@ -13,14 +13,13 @@ from threading import Thread
 CONFIG_FILE = "config.json"
 USERS_FILE = "users.json"
 
-# In-memory tracking for high speed detection and DM rate limits
+# In-memory tracking for high speed detection and hits
 range_hits_tracker = collections.defaultdict(list)
 range_hits_count = collections.defaultdict(int) # ZENEX live hits store
 last_announced_range = {}
 seen_console_hits = set()
-dm_range_cooldowns = {}
-last_global_dm_broadcast_time = 0 
 active_ranges_global = set() # লাইভ স্টক ট্র্যাকিং গ্লোবাল সেট
+active_user_watchers = set() # ট্র্যাকিং একটিভ নম্বরসমূহ
 
 # --- Database Manager (Firebase + Local Fallback) ---
 class DatabaseManager:
@@ -58,7 +57,6 @@ class DatabaseManager:
             except Exception as e:
                 print(f"Firebase get_user error: {e}")
         
-        # Local fallback
         if uid not in self.local_data["users"]:
             self.local_data["users"][uid] = {"balance": 0.0, "username": "", "id": int(uid)}
             self._save_local()
@@ -227,7 +225,7 @@ def get_country_info_by_range(range_val):
         "502": "Guatemala 🇬🇹",
         "972": "Israel 🇮🇱",
         "386": "Slovenia 🇸🇮",
-        "998": "Uzbekistan 🇺🇿",
+        "998": "Uzbekistan UZ",
         "40": "Romania 🇷🇴",
         "855": "Cambodia 🇰🇭",
         "266": "Lesotho 🇱🇸",
@@ -299,7 +297,7 @@ def load_config():
         "ZENEX_API_KEY": "ZNX_GWKKMCVK6JX425VXRTVP5NYV",  
         "BASE_URL": "https://api.zenexnetwork.com/v1", 
         "ADMIN_ID": 8262679678,
-        "BOT_NAME": "ZENEX OTP RECEIVE  💋👇", 
+        "BOT_NAME": "ZENEX OTP RECEIVE 💋👇", 
         "BOT_USERNAME": "SHS_SMSHUB_bot", 
         "DEV_USERNAME": "Saku_143",
         "FIREBASE_DB_URL": "https://shsotpbot-default-rtdb.firebaseio.com/",
@@ -381,7 +379,23 @@ def get_api_headers():
         "Content-Type": "application/json"
     }
 
-# --- Bot On/Off Check & User Tracking Middleware ---
+# --- Phone Number Formatting Rules ---
+# 1. Private Chat / Inbox: Full Number with '+' Prefix
+def format_full_phone_number(num):
+    num_str = str(num).replace("+", "").strip()
+    return f"+{num_str}"
+
+# 2. Public Channel / Group: Masked (First 4 + 'XXXX' + Last 4) with '+' Prefix
+def format_group_phone_number(num):
+    num_str = str(num).replace("+", "").strip()
+    if len(num_str) <= 8:
+        return f"+{num_str[:2]}****{num_str[-2:]}"
+    first_4 = num_str[:4]
+    last_4 = num_str[-4:]
+    masked_part = "X" * (len(num_str) - 8)
+    return f"+{first_4}{masked_part}{last_4}"
+
+# --- Bot Middleware ---
 @bot.middleware_handler(update_types=['message', 'callback_query'])
 def auto_track_and_check_status(bot_instance, package):
     try:
@@ -454,14 +468,6 @@ def format_rid(rid):
     if not rid_str.upper().endswith("XXX"):
         return f"{rid_str}XXX"
     return rid_str
-
-def format_otp_phone_number(num):
-    num_str = str(num).replace("+", "").strip()
-    if len(num_str) < 8:
-        return f"+{num_str}"
-    first_part = num_str[:5]
-    last_part = num_str[-2:]
-    return f"+{first_part}XXXXXX{last_part}"
 
 def reward_user_for_otp(user_id, phone_number):
     clean_num = str(phone_number).replace("+", "").strip()
@@ -667,7 +673,7 @@ def show_admin_dashboard(chat_id):
                types.InlineKeyboardButton("🔗 Set Firebase DB URL", callback_data="adm_setfirebase"))
     markup.row(types.InlineKeyboardButton("🔑 Update Zenex API Key", callback_data="adm_setkey"))
     
-    bot_title = config.get("BOT_NAME", "ZENEX OTP HUB 💋👇")
+    bot_title = config.get("BOT_NAME", "ZENEX OTP RECEIVE 💋👇")
     bot_user = config.get("BOT_USERNAME", "SHS_SMSHUB_bot")
     
     text = (f"🛠 **Zenex Network Admin Control Panel (V4.0.1)**\n\n"
@@ -1055,7 +1061,7 @@ def show_others_page(call):
     except:
         bot.send_message(chat_id=call.message.chat.id, text=text, reply_markup=markup, parse_mode="Markdown")
 
-# --- ডাইনামিক কান্ট্রি শো করা (লাইভ অ্যাক্টিভিটি অনুযায়ী সর্টেড - Best First) ---
+# --- ডাইনামিক কান্ট্রি শো করা (Best Active Country Always Top) ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("app_"))
 def show_countries(call):
     selected_app = call.data.split("_")[1]
@@ -1072,7 +1078,6 @@ def show_countries(call):
         if is_available:
             available_countries.append(country)
             
-    # সচল কান্ট্রিগুলোকে সর্ট করে ট্রাফিক স্কোর ও হিটের ওপর ভিত্তি করে সাজানো
     available_countries = sorted(
         available_countries,
         key=lambda c: (get_country_activity_score(selected_app, rids[c]), range_hits_count.get(format_rid(rids[c]), 0)),
@@ -1094,7 +1099,7 @@ def show_countries(call):
     markup.add(types.InlineKeyboardButton("⬅️ Back", callback_data="back_services"))
     bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=f"🌍 **{selected_app.upper()} (Zenex Network) এর জন্য দেশ সিলেক্ট করুন:**", reply_markup=markup, parse_mode="Markdown")
 
-# --- ZENEX Core /v1/getnum integration ---
+# --- ZENEX Core /v1/getnum ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("c_"))
 def request_number(call):
     _, country, selected_app = call.data.split("_")
@@ -1121,28 +1126,32 @@ def request_number(call):
         
         if meta.get("code") == 200 or meta.get("status") == "success":
             data_obj = res.get("data", {})
-            num = data_obj.get("full_number") or data_obj.get("number") or data_obj.get("copy")
+            num_raw = data_obj.get("full_number") or data_obj.get("number") or data_obj.get("copy")
+            
+            # ইউজার ইনবক্সের জন্য সম্পূর্ণ নম্বর (+ সাইন সহ)
+            full_num = format_full_phone_number(num_raw)
             
             msg = (f"✅ **Zenex Number Provisioned!**\n\n"
                    f"📱 Service ➔ **{selected_app.upper()}**\n"
                    f"🌍 Country ➔ **{country}**\n"
                    f"📡 Operator ➔ `{data_obj.get('operator', 'Global')}`\n\n"
-                   f"📞 Number: `{num}`\n\n"
-                   f"⏳ Status: Waiting For OTP\n"
+                   f"📞 Number: `{full_num}`\n\n"
+                   f"⏳ Status: **Waiting For OTP (Auto-Detecting...)**\n"
                    f"⏰ Validity ➔ 15 minutes\n"
-                   f"💎 নিচে 'Fetch Code' এ ক্লিক করে বা অটো ওটিপির জন্য অপেক্ষা করুন।")
+                   f"⚡ ওটিপি আসামাত্রই বট আপনাকে স্বয়ংক্রিয়ভাবে মেসেজ পাঠাবে!")
             
             markup = types.InlineKeyboardMarkup()
             markup.row(
-                types.InlineKeyboardButton("📥 Fetch Code", callback_data=f"fetch_{selected_app}_{country}_{num}"),
+                types.InlineKeyboardButton("🔄 Fetch Code (Manual Check)", callback_data=f"fetch_{selected_app}_{country}_{num_raw}"),
                 types.InlineKeyboardButton("🔄 Change Number", callback_data=f"c_{country}_{selected_app}")
             )
-            markup.row(types.InlineKeyboardButton("📋 Copy Number", callback_data=f"copynum_{num}"))
+            markup.row(types.InlineKeyboardButton("📋 Copy Number", callback_data=f"copynum_{full_num}"))
             markup.row(types.InlineKeyboardButton("🔗 View OTP Group", url=get_otp_group_link()))
             
             bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=msg, reply_markup=markup, parse_mode="Markdown")
             
-            Thread(target=background_user_otp_watcher, args=(call.message.chat.id, call.message.message_id, selected_app, country, num), daemon=True).start()
+            # ১০০% অটোমেটিক ব্যাকগ্রাউন্ড ওটিপি ওয়াচার চালু করা
+            Thread(target=background_user_otp_watcher, args=(call.message.chat.id, call.message.message_id, selected_app, country, num_raw), daemon=True).start()
         else:
             bot.answer_callback_query(call.id, text=f"❌ Zenex Panel: {res.get('message', 'নম্বর স্টক শেষ')}", show_alert=True)
     except Exception as e:
@@ -1158,17 +1167,23 @@ def copy_otp_alert(call):
     code = call.data.split("_")[1]
     bot.answer_callback_query(call.id, text=f"🔑 OTP Code: {code}", show_alert=True)
 
+# --- ম্যানুয়াল ওটিপি চেক বাটন হ্যান্ডলার (স্মুথ UX) ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("fetch_"))
 def manual_fetch(call):
     data_parts = call.data.split("_")
     selected_app = data_parts[1]
     country = data_parts[2]
     num = data_parts[3]
-    bot.answer_callback_query(call.id, text="🔍 ওটিপি চেক করা হচ্ছে...")
-    check_and_send_otp_manual(call.message.chat.id, selected_app, country, num)
+    
+    # লোডিং এনিমেশন পপআপ
+    bot.answer_callback_query(call.id, text="🔄 Fetching OTP... Please wait ⏳", show_alert=False)
+    
+    found = check_and_send_otp_manual(call.message.chat.id, selected_app, country, num, call.message.message_id)
+    if not found:
+        bot.answer_callback_query(call.id, text="⚠️ ওটিপি এখনো আসেনি! অটোমেটিক ডায়াল করা হচ্ছে, সাথেই থাকুন...", show_alert=True)
 
-# --- ZENEX Core /v1/numsuccess/info Parsing ---
-def check_and_send_otp_manual(chat_id, selected_app, country, num):
+# --- ওটিপি প্রসেসিং ও অটো ডেলিভারি লজিক ---
+def check_and_send_otp_manual(chat_id, selected_app, country, num, message_id=None):
     base_url = str(config['BASE_URL']).strip().rstrip('/')
     url = f"{base_url}/numsuccess/info"
     
@@ -1188,7 +1203,7 @@ def check_and_send_otp_manual(chat_id, selected_app, country, num):
             
             if found_msg:
                 current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                bot_title = config.get("BOT_NAME", "ZENEX OTP HUB 💋👇")
+                bot_title = config.get("BOT_NAME", "ZENEX OTP RECEIVE 💋👇")
                 bot_user = config.get("BOT_USERNAME", "SHS_SMSHUB_bot")
                 
                 code_match = re.search(r'\b\d{4,8}\b', found_msg)
@@ -1197,129 +1212,89 @@ def check_and_send_otp_manual(chat_id, selected_app, country, num):
                 rewarded, new_bal = reward_user_for_otp(chat_id, num)
                 reward_text = f"💰 **Earned:** +0.10 BDT (New Bal: `{new_bal} BDT`)" if rewarded else "ℹ️ *এই নম্বরের রিওয়ার্ড ইতোমধ্যে যোগ হয়েছে।*"
                 
-                masked_num = format_otp_phone_number(num)
+                # ইনবক্সের জন্য ফুল নম্বর এবং গ্রুপের জন্য মাস্কড নম্বর
+                full_num = format_full_phone_number(num)
+                group_masked_num = format_group_phone_number(num)
                 
-                alert_text = (f"🤖 **{bot_title}**\n"
-                              f"🌍 **{country} {selected_app.upper()} RECEIVED!**\n\n"
-                              f"🕒 Time: `{current_time}`\n"
-                              f"📱 Service: {selected_app.upper()}\n"
-                              f"📞 Number: `{masked_num}`\n"
-                              f"🌍 Country: {country}\n"
-                              f"🔑 OTP: `{isolated_code}`\n"
-                              f"{reward_text}\n\n"
-                              f"💬 Message:\n{found_msg}")
+                # ১. ইউজার ইনবক্স মেসেজ
+                user_alert_text = (f"🎉 **OTP RECEIVED SUCCESSFULLY!**\n\n"
+                                   f"🤖 **{bot_title}**\n"
+                                   f"🕒 Time: `{current_time}`\n"
+                                   f"📱 Service: **{selected_app.upper()}**\n"
+                                   f"📞 Number: `{full_num}`\n"
+                                   f"🌍 Country: {country}\n\n"
+                                   f"🔑 **OTP Code:** `{isolated_code}`\n\n"
+                                   f"{reward_text}\n\n"
+                                   f"💬 Message:\n`{found_msg}`")
                 
                 user_markup = types.InlineKeyboardMarkup()
                 user_markup.row(
                     types.InlineKeyboardButton("📋 Copy OTP", callback_data=f"copyotp_{isolated_code}"),
-                    types.InlineKeyboardButton("📞 Copy Number", callback_data=f"copynum_{num}")
+                    types.InlineKeyboardButton("📞 Copy Number", callback_data=f"copynum_{full_num}")
                 )
                 user_markup.row(types.InlineKeyboardButton("🔗 View OTP Group", url=get_otp_group_link()))
                 
-                try:
-                    bot.send_message(chat_id, alert_text, reply_markup=user_markup, parse_mode="Markdown")
-                except: pass
+                # ওটিপি পাওয়ার সাথে সাথে মূল মেসেজ আপডেট + নতুন অ্যালার্ট সেন্ড
+                if message_id:
+                    try: bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=user_alert_text, reply_markup=user_markup, parse_mode="Markdown")
+                    except: bot.send_message(chat_id, user_alert_text, reply_markup=user_markup, parse_mode="Markdown")
+                else:
+                    try: bot.send_message(chat_id, user_alert_text, reply_markup=user_markup, parse_mode="Markdown")
+                    except: pass
+                
+                # ২. গ্রুপ/পাবলিক চ্যানেল মেসেজ (মাস্কড নম্বর)
+                group_alert_text = (f"🤖 **{bot_title}**\n"
+                                    f"🌐 **{country} {selected_app.upper()} LIVE OTP!**\n\n"
+                                    f"🕒 Time: `{current_time}`\n"
+                                    f"📱 Service: {selected_app.upper()}\n"
+                                    f"📞 Number: `{group_masked_num}`\n"
+                                    f"🌍 Country: {country}\n"
+                                    f"🔑 OTP: `{isolated_code}`\n\n"
+                                    f"💬 Message:\n{found_msg}")
                 
                 group_markup = types.InlineKeyboardMarkup()
                 group_markup.row(
                     types.InlineKeyboardButton("📋 Copy OTP", callback_data=f"copyotp_{isolated_code}"),
-                    types.InlineKeyboardButton("📞 Copy Number", callback_data=f"copynum_{num}")
+                    types.InlineKeyboardButton("📞 Copy Number", callback_data=f"copynum_{group_masked_num}")
                 )
                 group_markup.row(types.InlineKeyboardButton("🔗 View OTP Group", url=get_otp_group_link()))
-                group_markup.row(
-                    types.InlineKeyboardButton("📱 Bot", url=f"https://t.me/{bot_user}")
-                )
+                group_markup.row(types.InlineKeyboardButton("📱 Bot", url=f"https://t.me/{bot_user}"))
                 
                 for dest_id in config.get("OTP_DESTINATIONS", []):
                     try:
-                        if str(dest_id).strip() == "-1003956226642":
+                        if str(dest_id).strip() == "-1003956226642": # পেমেন্ট চ্যানেল স্কিপ
                             continue
-                        bot.send_message(int(dest_id), alert_text, reply_markup=group_markup, parse_mode="Markdown")
+                        bot.send_message(int(dest_id), group_alert_text, reply_markup=group_markup, parse_mode="Markdown")
                     except: pass
                 return True
-            else:
-                bot.send_message(chat_id, "⚠️ ওটিপি এখনও প্যানেলে আসেনি। একটু পরে আবার চেষ্টা করুন।")
-        else:
-            bot.send_message(chat_id, "⚠️ সার্ভার থেকে কোনো ডেটা পাওয়া যায়নি।")
-    except:
-        bot.send_message(chat_id, "❌ ওটিপি চেক করতে গিয়ে সমস্যা হয়েছে।")
+    except Exception as e:
+        print(f"Error in check_and_send_otp_manual: {e}")
     return False
 
+# --- ১০০% অটোমেটিক ব্যাকগ্রাউন্ড ওটিপি ওয়াচার ---
 def background_user_otp_watcher(chat_id, message_id, selected_app, country, num):
-    base_url = str(config['BASE_URL']).strip().rstrip('/')
-    url = f"{base_url}/numsuccess/info"
+    num_clean = str(num).replace("+", "").strip()
+    if num_clean in active_user_watchers:
+        return
+    active_user_watchers.add(num_clean)
     
-    clean_num = str(num).replace("+", "").strip()
     checks = 0
-    while checks < 40:
-        time.sleep(15)
-        checks += 1
-        try:
-            res = requests.get(url, headers=get_api_headers(), timeout=15).json()
-            meta = res.get("meta", {})
-            if meta.get("code") == 200 or meta.get("status") == "success":
-                otps_list = res.get("data", {}).get("otps", [])
-                found_msg = None
-                for item in otps_list:
-                    item_num = str(item.get("number")).replace("+", "").strip()
-                    if item_num == clean_num or clean_num.endswith(item_num) or item_num.endswith(clean_num):
-                        found_msg = item.get("otp") or item.get("message")
-                        break
-                
-                if found_msg:
-                    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    bot_title = config.get("BOT_NAME", "ZENEX OTP HUB 💋👇")
-                    bot_user = config.get("BOT_USERNAME", "SHS_SMSHUB_bot")
-                    
-                    code_match = re.search(r'\b\d{4,8}\b', found_msg)
-                    isolated_code = code_match.group(0) if code_match else found_msg[:10]
-                    
-                    rewarded, new_bal = reward_user_for_otp(chat_id, num)
-                    reward_text = f"💰 **Earned:** +0.10 BDT (New Bal: `{new_bal} BDT`)" if rewarded else "ℹ️ *এই নম্বরের রিওয়ার্ড ইতোমধ্যে যোগ হয়েছে।*"
-                    
-                    masked_num = format_otp_phone_number(num)
-                    
-                    alert_text = (f"🤖 **{bot_title}**\n"
-                                  f"🌍 **{country} {selected_app.upper()} RECEIVED!**\n\n"
-                                  f"🕒 Time: `{current_time}`\n"
-                                  f"📱 Service: {selected_app.upper()}\n"
-                                  f"📞 Number: `{masked_num}`\n"
-                                  f"🌍 Country: {country}\n"
-                                  f"🔑 OTP: `{isolated_code}`\n"
-                                  f"{reward_text}\n\n"
-                                  f"💬 Message:\n{found_msg}")
-                    
-                    user_markup = types.InlineKeyboardMarkup()
-                    user_markup.row(
-                        types.InlineKeyboardButton("📋 Copy OTP", callback_data=f"copyotp_{isolated_code}"),
-                        types.InlineKeyboardButton("📞 Copy Number", callback_data=f"copynum_{num}")
-                    )
-                    user_markup.row(types.InlineKeyboardButton("🔗 View OTP Group", url=get_otp_group_link()))
-                    
-                    try:
-                        bot.send_message(chat_id, alert_text, reply_markup=user_markup, parse_mode="Markdown")
-                    except: pass
-                    
-                    group_markup = types.InlineKeyboardMarkup()
-                    group_markup.row(
-                        types.InlineKeyboardButton("📋 Copy OTP", callback_data=f"copyotp_{isolated_code}"),
-                        types.InlineKeyboardButton("📞 Copy Number", callback_data=f"copynum_{num}")
-                    )
-                    group_markup.row(types.InlineKeyboardButton("🔗 View OTP Group", url=get_otp_group_link()))
-                    group_markup.row(
-                        types.InlineKeyboardButton("📱 Bot", url=f"https://t.me/{bot_user}")
-                    )
-                    
-                    for dest_id in config.get("OTP_DESTINATIONS", []):
-                        try:
-                            if str(dest_id).strip() == "-1003956226642":
-                                continue
-                            bot.send_message(int(dest_id), alert_text, reply_markup=group_markup, parse_mode="Markdown")
-                        except: pass
-                    return
-        except:
-            pass
+    max_checks = 120 # ১০ মিনিট ধরে প্রতি ৩ সে. পর পর অটো চেক করবে (3 * 120 = 360s)
+    
+    try:
+        while checks < max_checks:
+            time.sleep(3)
+            checks += 1
+            
+            # ওটিপি পেয়ে গেলে থ্রেড বন্ধ হবে
+            success = check_and_send_otp_manual(chat_id, selected_app, country, num, message_id)
+            if success:
+                break
+    finally:
+        if num_clean in active_user_watchers:
+            active_user_watchers.remove(num_clean)
 
+# --- উইথড্র প্রসেসিং ---
 def process_withdraw_amount(message):
     chat_id = message.chat.id
     try:
@@ -1499,6 +1474,7 @@ def handle_admin_withdraw_action(call):
         try: bot.send_message(user_id, user_msg, parse_mode="Markdown")
         except: pass
 
+# --- সর্বজনীন সার্ভিস ডিটেকশন (সকল অ্যাপ সনাক্তকরণ) ---
 def detect_service_from_message(msg_body, fallback_platform):
     body_lower = str(msg_body).lower()
     
@@ -1506,15 +1482,15 @@ def detect_service_from_message(msg_body, fallback_platform):
         return "instagram"
     elif any(kw in body_lower for kw in ["facebook", "fb-", "fb code", "meta"]):
         return "facebook"
-    elif "whatsapp" in body_lower or "wa code" in body_lower:
+    elif any(kw in body_lower for kw in ["whatsapp", "wa code", "wa-"]):
         return "whatsapp"
-    elif "telegram" in body_lower or "tg code" in body_lower:
+    elif any(kw in body_lower for kw in ["telegram", "tg code", "tg-"]):
         return "telegram"
     elif "imo" in body_lower:
         return "imo"
     elif "discord" in body_lower:
         return "discord"
-    elif "tiktok" in body_lower or "tt code" in body_lower:
+    elif any(kw in body_lower for kw in ["tiktok", "tt code", "tt-"]):
         return "tiktok"
     
     plat_lower = str(fallback_platform).lower().strip()
@@ -1528,14 +1504,16 @@ def detect_service_from_message(msg_body, fallback_platform):
         return "whatsapp"
     elif plat_lower in ["tt", "tiktok"]:
         return "tiktok"
-    return plat_lower
+    elif plat_lower in ["imo", "discord"]:
+        return plat_lower
+    return "facebook" if "fb" in plat_lower else "instagram"
 
-# --- Zenex Network SMS / OTP Monitor ---
+# --- Zenex Network SMS / OTP Live Console Monitor ---
 def background_live_sms_monitor():
-    global seen_console_hits, range_hits_tracker, last_announced_range, dm_range_cooldowns, last_global_dm_broadcast_time
+    global seen_console_hits, range_hits_tracker, last_announced_range
     while True:
         try:
-            time.sleep(10)
+            time.sleep(5)
             base_url = str(config['BASE_URL']).strip().rstrip('/')
             url = f"{base_url}/numsuccess/info"
             res = requests.get(url, headers=get_api_headers(), timeout=15).json()
@@ -1561,6 +1539,7 @@ def background_live_sms_monitor():
                     platform = detect_service_from_message(msg_body, "General")
                     range_val = num[:8] + "XXX" if len(num) >= 8 else "Global"
                     
+                    # ডাইনামিক রেঞ্জ ও সার্ভিস অটো অ্যাড
                     if range_val and platform in config["SERVICES"]:
                         if country_name not in config["SERVICES"][platform]["rids"]:
                             config["SERVICES"][platform]["rids"][country_name] = str(range_val)
@@ -1593,17 +1572,21 @@ def background_live_sms_monitor():
                                 except: pass
 
                     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    bot_title = config.get("BOT_NAME", "ZENEX OTP HUB 💋👇")
+                    bot_title = config.get("BOT_NAME", "ZENEX OTP RECEIVE 💋👇")
                     bot_user = config.get("BOT_USERNAME", "SHS_SMSHUB_bot")
                     
                     code_match = re.search(r'\b\d{4,8}\b', msg_body)
                     isolated_code = code_match.group(0) if code_match else "N/A"
+                    
+                    # লাইভ গ্রুপ নোটিফিকেশনে মাস্কড নম্বর
+                    masked_num = format_group_phone_number(num)
                     
                     live_alert = (f"🤖 **{bot_title}**\n"
                                   f"🌐 **{country_name} {str(platform).upper()} LIVE OTP!**\n\n"
                                   f"🕒 Time: `{current_time}`\n"
                                   f"📱 Service: {str(platform).upper()}\n"
                                   f"⚡ Range: `{range_val}`\n"
+                                  f"📞 Number: `{masked_num}`\n"
                                   f"🌍 Country: {country_name}\n"
                                   f"🔑 OTP: `{isolated_code}`\n\n"
                                   f"💬 Message:\n{msg_body}")
@@ -1620,7 +1603,7 @@ def background_live_sms_monitor():
                             bot.send_message(int(dest_id), live_alert, reply_markup=markup, parse_mode="Markdown")
                         except: pass
         except:
-            time.sleep(15)
+            time.sleep(10)
 
 # --- ZENEX Core /v1/active-ranges Sync ---
 def sync_services_once():
@@ -1698,7 +1681,7 @@ def background_services_sync():
             sync_services_once()
         except Exception as e:
             print(f"Background Sync Error: {e}")
-        time.sleep(30)
+        time.sleep(20)
 
 @bot.callback_query_handler(func=lambda call: call.data == "back_services")
 def back_to_serv(call): send_services_menu(call.message.chat.id, call.message.message_id)
@@ -1719,7 +1702,7 @@ def check(call):
         bot.answer_callback_query(call.id, text="❌ আপনি এখনো সমস্ত বাধ্যতামূলক চ্যানেল বা গ্রুপে জয়েন করেননি!", show_alert=True)
 
 if __name__ == "__main__":
-    print("⏳ ZENEX Core API V4.0.1 সিঙ্ক হচ্ছে...")
+    print("⏳ ZENEX Core API V4.0.1 অটো সিঙ্ক হচ্ছে...")
     sync_services_once()
     
     keep_alive()
@@ -1728,5 +1711,5 @@ if __name__ == "__main__":
     
     try: bot.delete_webhook(drop_pending_updates=True)
     except: pass
-    print("🚀 ZENEX Core API OTP Bot সফলভাবে চালু হয়েছে...")
+    print("🚀 ZENEX Core API Premium Bot সফলভাবে চালু হয়েছে...")
     bot.polling(none_stop=True)
