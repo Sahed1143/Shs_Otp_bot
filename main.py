@@ -56,14 +56,31 @@ class DatabaseManager:
             try:
                 res = requests.get(f"{self.db_url}/users/{uid}.json", timeout=10)
                 if res.status_code == 200 and res.json() is not None:
-                    return res.json()
+                    u_data = res.json()
+                    if "referrer" not in u_data: u_data["referrer"] = None
+                    if "ref_earnings" not in u_data: u_data["ref_earnings"] = 0.0
+                    if "ref_count" not in u_data: u_data["ref_count"] = 0
+                    return u_data
             except Exception as e:
                 print(f"Firebase get_user error: {e}")
         
         # Local fallback
         if uid not in self.local_data["users"]:
-            self.local_data["users"][uid] = {"balance": 0.0, "username": "", "id": int(uid)}
+            self.local_data["users"][uid] = {
+                "balance": 0.0, 
+                "username": "", 
+                "id": int(uid),
+                "referrer": None,
+                "ref_earnings": 0.0,
+                "ref_count": 0
+            }
             self._save_local()
+        else:
+            u_data = self.local_data["users"][uid]
+            if "referrer" not in u_data: u_data["referrer"] = None
+            if "ref_earnings" not in u_data: u_data["ref_earnings"] = 0.0
+            if "ref_count" not in u_data: u_data["ref_count"] = 0
+            self.local_data["users"][uid] = u_data
         return self.local_data["users"][uid]
 
     def get_all_user_ids(self):
@@ -100,12 +117,34 @@ class DatabaseManager:
         self._save_local()
 
     def update_user_balance(self, user_id, amount):
-        user = self.get_user(user_id) or {"balance": 0.0, "username": "", "id": int(user_id)}
+        user = self.get_user(user_id)
         current_bal = float(user.get("balance", 0.0))
-        new_bal = round(current_bal + amount, 2)
+        new_bal = round(current_bal + amount, 4)
         user["balance"] = new_bal
         self.save_user(user_id, user)
         return new_bal
+
+    def add_referral_earning(self, referrer_id, amount):
+        ref_user = self.get_user(referrer_id)
+        if ref_user:
+            current_bal = float(ref_user.get("balance", 0.0))
+            current_ref_earn = float(ref_user.get("ref_earnings", 0.0))
+            
+            ref_user["balance"] = round(current_bal + amount, 4)
+            ref_user["ref_earnings"] = round(current_ref_earn + amount, 4)
+            self.save_user(referrer_id, ref_user)
+
+    def set_referrer(self, user_id, referrer_id):
+        if int(user_id) == int(referrer_id): return
+        user = self.get_user(user_id)
+        if not user.get("referrer"):
+            user["referrer"] = int(referrer_id)
+            self.save_user(user_id, user)
+            
+            ref_user = self.get_user(referrer_id)
+            if ref_user:
+                ref_user["ref_count"] = int(ref_user.get("ref_count", 0)) + 1
+                self.save_user(referrer_id, ref_user)
 
     def has_number_received_otp(self, number):
         num = str(number).replace("+", "").strip()
@@ -303,11 +342,11 @@ def load_config():
         "ZENEX_API_KEY": "ZNX_GWKKMCVK6JX425VXRTVP5NYV",  
         "BASE_URL": "https://api.zenexnetwork.com/v1", 
         "ADMIN_ID": 8262679678,
-        "BOT_NAME": "👑 ZENEX OTP RECEIVE 👑", 
+        "BOT_NAME": "👑 SHS OTP HUB 👑", 
         "BOT_USERNAME": "SHS_SMSHUB_bot", 
         "DEV_USERNAME": "Saku_143",
         "FIREBASE_DB_URL": "https://shsotpbot-default-rtdb.firebaseio.com/",
-        "BALANCE_TEXT": "💰 ওটিপি রিসিভ করে টাকা ইনকাম করুন! প্রতি সফল ওটিপিতে পাবেন ০.১০ টাকা।",
+        "BALANCE_TEXT": "💰 ওটিপি রিসিভ করে টাকা ইনকাম করুন! প্রতি সফল ওটিপিতে পাবেন ০.২০ টাকা।",
         "WITHDRAW_TEXT": "📉 মিনিমাম উইথড্র ৫০ টাকা। পেমেন্ট গেটওয়েগুলো চেক করুন।",
         "BOT_STATUS": "ON",
         "BOT_OFF_REASON": "",
@@ -327,16 +366,19 @@ def load_config():
             "-1003956226642",
             "-1004309875319"
         ],
-        "NOTICE": "⚠️ ZENEX Core V4.0.1 সার্ভিসটি ফুল স্পিডে সচল রয়েছে।",
+        "NOTICE": "👋 আমাদের বটে স্বাগতম! ফুল স্পিডে ওটিপি রিসিভ করুন।",
         "CUSTOM_SERVICES": [],
         "SERVICES": {
-            "facebook": {"name": "📘 Facebook", "rids": {}},
-            "whatsapp": {"name": "💚 WhatsApp", "rids": {}},
             "instagram": {"name": "📸 Instagram", "rids": {}},
+            "facebook": {"name": "📘 Facebook", "rids": {}},
+            "imo": {"name": "📱 Imo", "rids": {}},
+            "tiktok": {"name": "🎵 TikTok", "rids": {}},
+            "facebookv2": {"name": "📘 Facebook-V2", "rids": {}},
+            "whatsapp": {"name": "💚 WhatsApp", "rids": {}},
+            "uber": {"name": "🚗 Uber", "rids": {}},
+            "hsbc": {"name": "🏦 HSBC", "rids": {}},
             "telegram": {"name": "✈️ Telegram", "rids": {}},
-            "imo": {"name": "📱 IMO", "rids": {}},
-            "discord": {"name": "👾 Discord", "rids": {}},
-            "tiktok": {"name": "🎵 TikTok", "rids": {}}
+            "discord": {"name": "👾 Discord", "rids": {}}
         }
     }
     
@@ -448,12 +490,12 @@ def auto_track_and_check_status(bot_instance, package):
         print(f"Error in status/tracking middleware: {e}")
 
 @app.route('/')
-def home(): return "Zenex Network OTP Bot is Live & Active!"
+def home(): return "SHS OTP HUB Engine is Live & Active!"
 
 def run(): app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
 def keep_alive(): Thread(target=run).start()
 
-def track_user(user_id):
+def track_user(user_id, referrer_id=None):
     global all_users
     try:
         u_id = int(user_id)
@@ -461,6 +503,8 @@ def track_user(user_id):
             if u_id not in all_users:
                 all_users.add(u_id)
                 db.get_user(u_id)
+                if referrer_id:
+                    db.set_referrer(u_id, referrer_id)
                 save_users(all_users)
     except:
         pass
@@ -490,9 +534,21 @@ def reward_user_for_otp(user_id, phone_number):
     if db.has_number_received_otp(clean_num):
         return False, db.get_user(user_id).get("balance", 0.0)
         
-    reward_amount = 0.10
+    reward_amount = 0.20  # প্রতি সফল ওটিপিতে ০.২০ টাকা
     db.mark_number_received_otp(clean_num)
     new_bal = db.update_user_balance(user_id, reward_amount)
+    
+    # --- ৩% রেফারেল কমিশন যুক্তকরণ ---
+    user_info = db.get_user(user_id)
+    referrer_id = user_info.get("referrer")
+    if referrer_id:
+        ref_commission = round(reward_amount * 0.03, 4) # 3% Commission = 0.006 BDT
+        db.add_referral_earning(referrer_id, ref_commission)
+        try:
+            bot.send_message(referrer_id, f"🎉 **রেফারেল বোনাস অর্জিত হয়েছে!**\n\nআপনার রেফারের ইউজার ওটিপি রিসিভ করায় আপনি ৩% কমিশন (`+{ref_commission} BDT`) পেয়েছেন!")
+        except:
+            pass
+            
     return True, new_bal
 
 def get_country_activity_score(platform, rid_val):
@@ -513,39 +569,49 @@ def get_otp_group_link():
         return config["GROUPS_TO_JOIN"][0]["link"]
     return "https://t.me/+DXdDIm7-rRU4YTQ1"
 
+# --- স্ক্রিনশটের মতো ক্লিন মেইন মেনু (Home Keyboard) ---
 def send_home_keyboard(chat_id, text=None):
     track_user(chat_id)
+    bot_name = config.get("BOT_NAME", "👑 SHS OTP HUB 👑")
     if not text:
-        text = f"👋 **ওটিপি ড্যাশবোর্ডে স্বাগতম!** (Zenex Core API V4.0.1)\n\n📢 **নোটিশ:** {config.get('NOTICE', 'কোনো নোটিশ নেই')}"
+        text = f"👋 **{bot_name} এ আপনাকে স্বাগতম!**\n\n📢 **নোটিশ:** {config.get('NOTICE', 'স্বাগতম!')}"
         
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.row(types.KeyboardButton("📲 Get Number"), types.KeyboardButton("📊 Active Traffic"))
-    markup.row(types.KeyboardButton("💎 Balance"), types.KeyboardButton("📉 Withdraw"))
-    markup.row(types.KeyboardButton("🌐 Available Countries"), types.KeyboardButton("🔐 2FA GENERATE"))
+    markup.row(types.KeyboardButton("📱 Get Number"))
+    markup.row(types.KeyboardButton("👥 Reffer & Earn"), types.KeyboardButton("📊 Dashboard"))
+    markup.row(types.KeyboardButton("🔑 2FA CODE"), types.KeyboardButton("📊 Live Traffic"))
+    markup.row(types.KeyboardButton("💬 Support"))
+    
     if chat_id == int(config["ADMIN_ID"]):
         markup.row(types.KeyboardButton("🛠 Admin Dashboard"))
     safe_send_message(chat_id, text, reply_markup=markup)
 
+# --- স্ক্রিনশটের (Image 2) মতো ইনলাইন সার্ভিস কিবোর্ড ---
 def send_services_menu(chat_id, message_id=None):
     track_user(chat_id)
     markup = types.InlineKeyboardMarkup()
-    services = config.get("SERVICES", {})
     
-    core_ids = ["facebook", "whatsapp", "instagram", "telegram", "imo", "tiktok", "discord"]
+    markup.row(
+        types.InlineKeyboardButton("📸 Instagram", callback_data="app_instagram"),
+        types.InlineKeyboardButton("📘 Facebook", callback_data="app_facebook")
+    )
+    markup.row(
+        types.InlineKeyboardButton("📱 Imo", callback_data="app_imo"),
+        types.InlineKeyboardButton("🎵 TikTok", callback_data="app_tiktok")
+    )
+    markup.row(
+        types.InlineKeyboardButton("📘 Facebook-V2", callback_data="app_facebookv2"),
+        types.InlineKeyboardButton("💚 WhatsApp", callback_data="app_whatsapp")
+    )
+    markup.row(
+        types.InlineKeyboardButton("🚗 Uber", callback_data="app_uber"),
+        types.InlineKeyboardButton("🏦 HSBC", callback_data="app_hsbc")
+    )
+    markup.row(
+        types.InlineKeyboardButton("❌ Close", callback_data="close_menu")
+    )
     
-    row = []
-    for s_id in core_ids:
-        if s_id in services and services[s_id].get("rids"):
-            row.append(types.InlineKeyboardButton(services[s_id]["name"], callback_data=f"app_{s_id}"))
-            if len(row) == 2:
-                markup.row(*row)
-                row = []
-    if row: markup.row(*row)
-    
-    markup.add(types.InlineKeyboardButton("✨ Others Apps ➔", callback_data="others_page_0"))
-    markup.add(types.InlineKeyboardButton("⬅️ Back to Main", callback_data="back_main"))
-    
-    text = "📱 **কোন অ্যাপের নম্বর নিতে চান? সিলেক্ট করুন:**"
+    text = "🛑 **Select your favourite SERVICE** 🔻"
     if message_id:
         try: bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, reply_markup=markup, parse_mode="Markdown")
         except: safe_send_message(chat_id, text, reply_markup=markup)
@@ -554,9 +620,18 @@ def send_services_menu(chat_id, message_id=None):
 
 @bot.message_handler(commands=['start'], chat_types=['private'])
 def start_bot(message):
-    track_user(message.chat.id)
-    if is_subscribed_all(message.chat.id):
-        send_home_keyboard(message.chat.id)
+    chat_id = message.chat.id
+    
+    # রেফারেল লিঙ্ক পার্সিং
+    command_args = message.text.split()
+    referrer_id = None
+    if len(command_args) > 1 and command_args[1].isdigit():
+        referrer_id = int(command_args[1])
+        
+    track_user(chat_id, referrer_id)
+    
+    if is_subscribed_all(chat_id):
+        send_home_keyboard(chat_id)
     else:
         markup = types.InlineKeyboardMarkup()
         for ch in config.get("CHANNELS_TO_JOIN", []):
@@ -564,7 +639,7 @@ def start_bot(message):
         for grp in config.get("GROUPS_TO_JOIN", []):
             markup.row(types.InlineKeyboardButton(grp["name"], url=grp["link"]))
         markup.row(types.InlineKeyboardButton("✅ Joined (Check)", callback_data="check_membership"))
-        safe_send_message(message.chat.id, "⚠️ সার্ভিসটি ব্যবহার করতে নিচের সমস্ত চ্যানেল এবং গ্রুপগুলোতে অবশ্যই জয়েন করুন, এরপর 'Joined' বাটনে ক্লিক করুন।", reply_markup=markup)
+        safe_send_message(chat_id, "⚠️ সার্ভিসটি ব্যবহার করতে নিচের সমস্ত চ্যানেল এবং গ্রুপগুলোতে অবশ্যই জয়েন করুন, এরপর 'Joined' বাটনে ক্লিক করুন।", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: True, chat_types=['private'])
 def handle_text(message):
@@ -580,29 +655,66 @@ def handle_text(message):
         return
     
     text = message.text
-    if text in ["📲 Get Number", "📞 Get Number"]:
+    bot_username = config.get("BOT_USERNAME", "SHS_SMSHUB_bot")
+    
+    if text in ["📱 Get Number", "📲 Get Number", "📞 Get Number"]:
         send_services_menu(message.chat.id)
-    elif text == "📊 Active Traffic":
-        fetch_live_traffic(message.chat.id)
-    elif text in ["💎 Balance", "💰 Balance"]:
+    elif text == "👥 Reffer & Earn":
+        user_info = db.get_user(message.chat.id)
+        ref_count = user_info.get("ref_count", 0)
+        ref_earn = user_info.get("ref_earnings", 0.0)
+        ref_link = f"https://t.me/{bot_username}?start={message.chat.id}"
+        
+        msg = (f"👥 **রেফারেল প্রোগ্রাম (৩% কমিশন)**\n\n"
+               f"🔗 **আপনার ইউনিক রেফার লিঙ্ক:**\n`{ref_link}`\n\n"
+               f"📊 **রেফারেল পরিসংখ্যান:**\n"
+               f" ├ 👤 মোট রেফারেল: `{ref_count}` জন\n"
+               f" └ 💰 রেফার থেকে আয়: `{ref_earn:.4f} BDT`\n\n"
+               f"💡 আপনার রেফারেল লিঙ্কে যুক্ত হওয়া কোনো ইউজার সফল ওটিপি রিসিভ করলেই তার আয়ের **৩% কমিশন** সরাসরি আপনার অ্যাকাউন্টে যুক্ত হবে!")
+        safe_send_message(message.chat.id, msg)
+        
+    elif text in ["📊 Dashboard", "💎 Balance", "💰 Balance"]:
         user_data = db.get_user(message.chat.id)
         current_bal = user_data.get("balance", 0.0)
-        bal_text = (f"💎 **আপনার ব্যালেন্স প্রোফাইল**\n\n"
+        bal_text = (f"📊 **আপনার ড্যাশবোর্ড ও ব্যালেন্স**\n\n"
                     f"• ইউজার আইডি: `{message.chat.id}`\n"
-                    f"• বর্তমান ব্যালেন্স: `{current_bal} BDT`\n\n"
+                    f"• বর্তমান ব্যালেন্স: `{current_bal} BDT`\n"
+                    f"• প্রতি ওটিপিতে আয়: `0.20 BDT`\n\n"
                     f"{config.get('BALANCE_TEXT', '')}")
-        safe_send_message(message.chat.id, bal_text)
+        
+        markup = types.InlineKeyboardMarkup()
+        markup.row(types.InlineKeyboardButton("📉 Withdraw", callback_data="btn_withdraw_init"))
+        safe_send_message(message.chat.id, bal_text, reply_markup=markup)
+        
     elif text == "📉 Withdraw":
-        user_data = db.get_user(message.chat.id)
-        bal = user_data.get("balance", 0.0)
-        msg = safe_send_message(message.chat.id, f"💎 **উইথড্র করার পরিমাণ (BDT) লিখুন:**\n\n• আপনার বর্তমান ব্যালেন্স: `{bal} BDT`\n• মিনিমাম উইথড্র: `50 BDT`")
-        if msg: bot.register_next_step_handler(msg, process_withdraw_amount)
-    elif text in ["🌐 Available Countries", "🌍 Available Countries"]:
-        send_available_countries(message.chat.id)
-    elif text == "🔐 2FA GENERATE":
-        safe_send_message(message.chat.id, "🔐 2FA কোড জেনারেট করার জন্য আপনার সিক্রেট কোডটি দিন।")
+        initiate_withdraw(message.chat.id)
+    elif text == "📊 Live Traffic":
+        fetch_live_traffic(message.chat.id)
+    elif text == "🔑 2FA CODE":
+        safe_send_message(message.chat.id, "🔐 **2FA Code Generator:**\nআপনার 2FA সিক্রেট কি (Secret Key) লিখে পাঠান:")
+    elif text == "💬 Support":
+        markup = types.InlineKeyboardMarkup()
+        for grp in config.get("GROUPS_TO_JOIN", []):
+            markup.add(types.InlineKeyboardButton(f"💬 {grp['name']}", url=grp['link']))
+        markup.add(types.InlineKeyboardButton("📞 Admin Support", url=f"https://t.me/{config.get('DEV_USERNAME', 'Saku_143')}"))
+        safe_send_message(message.chat.id, "💬 **যেকোনো সহায়তার জন্য সাপোর্ট গ্রুপে বা এডমিনের সাথে যোগাযোগ করুন:**", reply_markup=markup)
     elif text == "🛠 Admin Dashboard" and message.chat.id == int(config["ADMIN_ID"]):
         show_admin_dashboard(message.chat.id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "close_menu")
+def close_in_menu(call):
+    try: bot.delete_message(call.message.chat.id, call.message.message_id)
+    except: pass
+
+@bot.callback_query_handler(func=lambda call: call.data == "btn_withdraw_init")
+def btn_withdraw_trigger(call):
+    initiate_withdraw(call.message.chat.id)
+
+def initiate_withdraw(chat_id):
+    user_data = db.get_user(chat_id)
+    bal = user_data.get("balance", 0.0)
+    msg = safe_send_message(chat_id, f"📉 **উইথড্র করার পরিমাণ (BDT) লিখুন:**\n\n• আপনার বর্তমান ব্যালেন্স: `{bal} BDT`\n• মিনিমাম উইথড্র: `50 BDT`")
+    if msg: bot.register_next_step_handler(msg, process_withdraw_amount)
 
 def render_payment_toggle(chat_id, message_id=None):
     settings = config.get("PAYMENT_SETTINGS", {"bkash": True, "nagad": True, "binance": True})
@@ -625,12 +737,12 @@ def render_payment_toggle(chat_id, message_id=None):
         safe_send_message(chat_id, text, reply_markup=markup)
 
 def fetch_live_traffic(chat_id):
-    msg = "📊 **Zenex Core Real-Time Active Traffic & Performance:**\n\n"
+    msg = "📊 **SHS OTP HUB Real-Time Active Traffic:**\n\n"
     
     services = config.get("SERVICES", {})
     active_count = 0
     
-    for s_id in ["whatsapp", "facebook", "telegram", "instagram", "imo", "tiktok", "discord"]:
+    for s_id in ["instagram", "facebook", "imo", "tiktok", "whatsapp", "facebookv2"]:
         if s_id in services:
             s_info = services[s_id]
             rids = s_info.get("rids", {})
@@ -655,16 +767,8 @@ def fetch_live_traffic(chat_id):
     if active_count == 0:
         msg += "⚠️ বর্তমানে কোনো সচল ট্রাফিক রেঞ্জ পাওয়া যায়নি। অনুগ্রহ করে একটু পর চেষ্টা করুন।"
     else:
-        msg += "💡 **টিপস:** ওটিপি দ্রুত পেতে সর্বদা তালিকায় বেশি হিটস থাকা দেশগুলো সিলেক্ট করুন।"
+        msg += "💡 **টিপস:** ওটিপি দ্রুত পেতে তালিকায় বেশি হিটস থাকা দেশগুলো সিলেক্ট করুন।"
         
-    safe_send_message(chat_id, msg)
-
-def send_available_countries(chat_id):
-    msg = "🌐 **বর্তমান উপলব্ধ দেশসমূহ ও Zenex Range ID:**\n\n"
-    for s_id, s_info in config["SERVICES"].items():
-        if s_info.get("rids"):
-            rids_str = ", ".join([f"{c}: `{r}`" for c, r in s_info["rids"].items()])
-            msg += f"{s_info['name']} ➔ {rids_str}\n"
     safe_send_message(chat_id, msg)
 
 def show_admin_dashboard(chat_id):
@@ -688,14 +792,12 @@ def show_admin_dashboard(chat_id):
                types.InlineKeyboardButton("🔗 Set Firebase DB URL", callback_data="adm_setfirebase"))
     markup.row(types.InlineKeyboardButton("🔑 Update Zenex API Key", callback_data="adm_setkey"))
     
-    bot_title = config.get("BOT_NAME", "👑 ZENEX OTP RECEIVE 👑")
+    bot_title = config.get("BOT_NAME", "👑 SHS OTP HUB 👑")
     bot_user = config.get("BOT_USERNAME", "SHS_SMSHUB_bot")
     
-    text = (f"🛠 **Zenex Network Admin Control Panel (V4.0.1)**\n\n"
+    text = (f"🛠 **Admin Control Panel**\n\n"
             f"• Bot Name: `{bot_title}`\n"
             f"• Bot Username: `@{bot_user}`\n"
-            f"• API Endpoint: `https://api.zenexnetwork.com/v1`\n"
-            f"• Zenex API Key: `{config.get('ZENEX_API_KEY', '')}`\n"
             f"• Total Users: `{len(all_users)}`\n"
             f"• মোট সচল অ্যাপ: {len(config['SERVICES'])}\n"
             f"• বর্তমান নোটিশ: {config.get('NOTICE', 'নেই')}\n"
@@ -822,7 +924,7 @@ def process_admin_save_user_balance(message, target_uid):
         
         try:
             bot.send_message(target_uid, 
-                             f"💎 **আপনার ব্যালেন্স অ্যাডমিন কর্তৃক আপডেট করা হয়েছে!**\n\n"
+                             f"💎 **আপনার ব্যালেন্স এডমিন কর্তৃক আপডেট করা হয়েছে!**\n\n"
                              f"• পূর্বের ব্যালেন্স: `{old_bal} BDT`\n"
                              f"• নতুন ব্যালেন্স: `{new_bal} BDT`", 
                              parse_mode="Markdown")
@@ -1039,43 +1141,6 @@ def save_api_key(message):
     bot.send_message(message.chat.id, "✅ Zenex API Key আপডেট হয়েছে।")
     show_admin_dashboard(message.chat.id)
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("others_page_"))
-def show_others_page(call):
-    page = int(call.data.split("_")[2])
-    services = config.get("SERVICES", {})
-    core_ids = {"facebook", "whatsapp", "instagram", "imo", "tiktok"}
-    
-    other_services = [s_id for s_id in services if s_id not in core_ids and services[s_id].get("rids")]
-    
-    per_page = 5
-    total_pages = (len(other_services) + per_page - 1) // per_page if other_services else 1
-    page = max(0, min(page, total_pages - 1))
-    
-    start_idx = page * per_page
-    end_idx = start_idx + per_page
-    page_items = other_services[start_idx:end_idx]
-    
-    markup = types.InlineKeyboardMarkup()
-    for s_id in page_items:
-        markup.add(types.InlineKeyboardButton(services[s_id]["name"], callback_data=f"app_{s_id}"))
-        
-    nav_buttons = []
-    if page > 0:
-        nav_buttons.append(types.InlineKeyboardButton("⏪ Prev", callback_data=f"others_page_{page-1}"))
-    if end_idx < len(other_services):
-        nav_buttons.append(types.InlineKeyboardButton("Next ⏩", callback_data=f"others_page_{page+1}"))
-        
-    if nav_buttons:
-        markup.row(*nav_buttons)
-        
-    markup.add(types.InlineKeyboardButton("⬅️ Back to Main Services", callback_data="back_services"))
-    
-    text = f"✨ **অন্যান্য উপলব্ধ অ্যাপসমূহ (Page {page+1}/{total_pages}):**"
-    try:
-        bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=text, reply_markup=markup, parse_mode="Markdown")
-    except:
-        safe_send_message(call.message.chat.id, text, reply_markup=markup)
-
 # --- ডাইনামিক কান্ট্রি শো করা (Best Active Country Always Top) ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("app_"))
 def show_countries(call):
@@ -1108,11 +1173,11 @@ def show_countries(call):
     if row: markup.row(*row)
     markup.add(types.InlineKeyboardButton("⬅️ Back", callback_data="back_services"))
     
-    text = f"🌐 **{selected_app.upper()} (Zenex Network) এর জন্য দেশ সিলেক্ট করুন:**"
+    text = f"🌐 **{selected_app.upper()} এর জন্য দেশ সিলেক্ট করুন:**"
     try: bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=text, reply_markup=markup, parse_mode="Markdown")
-    except: safe_send_message(chat_id, text, reply_markup=markup)
+    except: safe_send_message(call.message.chat.id, text, reply_markup=markup)
 
-# --- ZENEX Core /v1/getnum ---
+# --- GET NUMBER ENGINE ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("c_"))
 def request_number(call):
     _, country, selected_app = call.data.split("_")
@@ -1131,7 +1196,7 @@ def request_number(call):
     try:
         response = requests.post(url, json=payload, headers=get_api_headers(), timeout=20)
         if response.status_code != 200:
-            bot.answer_callback_query(call.id, text=f"❌ Zenex API status: {response.status_code}", show_alert=True)
+            bot.answer_callback_query(call.id, text=f"❌ API Status: {response.status_code}", show_alert=True)
             return
             
         res = response.json()
@@ -1143,7 +1208,7 @@ def request_number(call):
             
             full_num = format_full_phone_number(num_raw)
             
-            msg = (f"⚡ **Zenex Number Provisioned!**\n\n"
+            msg = (f"⚡ **Number Provisioned!**\n\n"
                    f"📱 Service ➔ **{selected_app.upper()}**\n"
                    f"🌐 Country ➔ **{country}**\n"
                    f"📡 Operator ➔ `{data_obj.get('operator', 'Global')}`\n\n"
@@ -1165,7 +1230,7 @@ def request_number(call):
             
             Thread(target=background_user_otp_watcher, args=(call.message.chat.id, call.message.message_id, selected_app, country, num_raw), daemon=True).start()
         else:
-            bot.answer_callback_query(call.id, text=f"❌ Zenex Panel: {res.get('message', 'নম্বর স্টক শেষ')}", show_alert=True)
+            bot.answer_callback_query(call.id, text=f"❌ Panel Notice: {res.get('message', 'নম্বর স্টক শেষ')}", show_alert=True)
     except Exception as e:
         bot.answer_callback_query(call.id, text="⚠️ কানেকশন সমস্যা! আবার ট্রাই করুন।", show_alert=True)
 
@@ -1212,14 +1277,14 @@ def check_and_send_otp_manual(chat_id, selected_app, country, num, message_id=No
             
             if found_msg:
                 current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                bot_title = config.get("BOT_NAME", "👑 ZENEX OTP RECEIVE 👑")
+                bot_title = config.get("BOT_NAME", "👑 SHS OTP HUB 👑")
                 bot_user = config.get("BOT_USERNAME", "SHS_SMSHUB_bot")
                 
                 code_match = re.search(r'\b\d{4,8}\b', found_msg)
                 isolated_code = code_match.group(0) if code_match else found_msg[:10]
                 
                 rewarded, new_bal = reward_user_for_otp(chat_id, num)
-                reward_text = f"💎 **Earned:** +0.10 BDT (New Bal: `{new_bal} BDT`)" if rewarded else "ℹ️ *এই নম্বরের রিওয়ার্ড ইতোমধ্যে যোগ হয়েছে।*"
+                reward_text = f"💎 **Earned:** +0.20 BDT (New Bal: `{new_bal} BDT`)" if rewarded else "ℹ️ *এই নম্বরের রিওয়ার্ড ইতোমধ্যে যোগ হয়েছে।*"
                 
                 full_num = format_full_phone_number(num)
                 group_masked_num = format_group_phone_number(num)
@@ -1241,7 +1306,7 @@ def check_and_send_otp_manual(chat_id, selected_app, country, num, message_id=No
                     try: bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=card_update_text, reply_markup=card_markup, parse_mode="Markdown")
                     except: pass
 
-                # ২. ইউজারের জন্য আলাদা এক্সট্রা ওটিপি মেসেজ পাঠন
+                # ২. ইউজারের জন্য আলাদা এক্সট্রা ওটিপি মেসেজ পাঠানো
                 user_alert_text = (f"🎉 **NEW OTP RECEIVED!** 🎉\n\n"
                                    f"🤖 **{bot_title}**\n"
                                    f"🕒 Time: `{current_time}`\n"
@@ -1517,7 +1582,7 @@ def detect_service_from_message(msg_body, fallback_platform):
     
     return plat_lower if plat_lower else "facebook"
 
-# --- Zenex Network SMS / OTP Live Console Monitor Engine ---
+# --- SMS / OTP Live Monitor Engine (FORWARDING TO OTP GROUP) ---
 def background_live_sms_monitor():
     global seen_console_hits, range_hits_tracker, last_announced_range
     while True:
@@ -1574,7 +1639,7 @@ def background_live_sms_monitor():
                             last_announced_range[key] = current_time_epoch
                             
                             speed_alert = (
-                                f"🚀 **ZENEX SUPER FAST RANGE DETECTED!** 🚀\n\n"
+                                f"🚀 **SUPER FAST RANGE DETECTED!** 🚀\n\n"
                                 f"🔥 **Service:** {str(platform).upper()}\n"
                                 f"🌐 **Country:** {country_name}\n"
                                 f"⚡ **Range:** `{range_val}`\n"
@@ -1590,7 +1655,7 @@ def background_live_sms_monitor():
                                 except: pass
 
                     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    bot_title = config.get("BOT_NAME", "👑 ZENEX OTP RECEIVE 👑")
+                    bot_title = config.get("BOT_NAME", "👑 SHS OTP HUB 👑")
                     bot_user = config.get("BOT_USERNAME", "SHS_SMSHUB_bot")
                     
                     code_match = re.search(r'\b\d{4,8}\b', msg_body)
@@ -1623,7 +1688,7 @@ def background_live_sms_monitor():
             print(f"Monitor loop error: {e}")
             time.sleep(5)
 
-# --- ZENEX Core /v1/active-ranges Sync Engine ---
+# --- Active Ranges Sync Engine ---
 def sync_services_once():
     global active_ranges_global, range_hits_count
     try:
@@ -1661,7 +1726,7 @@ def sync_services_once():
                 
                 save_config(config)
     except Exception as e:
-        print(f"Zenex Active Ranges Sync error: {e}")
+        print(f"Active Ranges Sync error: {e}")
 
 def background_services_sync():
     while True:
@@ -1690,7 +1755,7 @@ def check(call):
         bot.answer_callback_query(call.id, text="❌ আপনি এখনো সমস্ত বাধ্যতামূলক চ্যানেল বা গ্রুপে জয়েন করেননি!", show_alert=True)
 
 if __name__ == "__main__":
-    print("⏳ ZENEX Core API V4.0.1 রিয়েল-টাইম ইঞ্জিন স্টার্ট হচ্ছে...")
+    print("⏳ SHS OTP HUB রিয়েল-টাইম ইঞ্জিন স্টার্ট হচ্ছে...")
     sync_services_once()
     
     keep_alive()
@@ -1699,5 +1764,5 @@ if __name__ == "__main__":
     
     try: bot.delete_webhook(drop_pending_updates=True)
     except: pass
-    print("🚀 ZENEX Premium Multi-Threaded Bot রানিং...")
+    print("🚀 SHS OTP HUB Premium Multi-Threaded Bot রানিং...")
     bot.polling(none_stop=True)
