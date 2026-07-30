@@ -310,7 +310,7 @@ def get_country_info_by_range(range_val):
         return "Global 🌐"
     
     clean_range = str(range_val).strip().upper()
-    prefix_range = clean_range.replace("XXX", "")
+    prefix_range = clean_range.replace("XXX", "").replace("+", "")
     
     prefix_map = {
         "236749": "Central African Republic 🇨🇫",
@@ -565,7 +565,7 @@ def is_subscribed_all(user_id):
     return True
 
 def format_rid(rid):
-    rid_str = str(rid).strip()
+    rid_str = str(rid).strip().replace("+", "")
     if not rid_str.upper().endswith("XXX"):
         return f"{rid_str}XXX"
     return rid_str
@@ -639,10 +639,9 @@ def send_home_keyboard(chat_id, text=None):
         markup.row(types.KeyboardButton("🔑 2FA CODE"), types.KeyboardButton("📊 Live Traffic"))
         markup.row(types.KeyboardButton("🌐 ভাষা পরিবর্তন"), types.KeyboardButton("💬 Support"))
     
-    # অ্যাডমিন বাটন এখান থেকে হাইড রাখা হয়েছে। শুধু /admin কমান্ড কাজ করবে।
     safe_send_message(chat_id, text, reply_markup=markup)
 
-# --- ডায়নামিক ইনলাইন সার্ভিস মেনু (হাই-স্পিড সেরা সার্ভিস সার্ভিস উপরে থাকবে) ---
+# --- ডায়নামিক ইনলাইন সার্ভিস মেনু (হাই-স্পিড সেরা সার্ভিস উপরে থাকবে) ---
 def send_services_menu(chat_id, message_id=None, page=0):
     track_user(chat_id)
     u_data = db.get_user(chat_id)
@@ -658,13 +657,13 @@ def send_services_menu(chat_id, message_id=None, page=0):
         for r_val in rids.values():
             clean_r = format_rid(r_val)
             total_hits += range_hits_count.get(clean_r, 0)
-            total_hits += len([t for (r, p), times in range_hits_tracker.items() if format_rid(r) == clean_r for t in times])
+            total_hits += len([t for (r, p), times in range_hits_tracker.items() if format_rid(r) == clean_r and p == s_id for t in times])
             
         icon = get_service_icon(s_id)
         name = s_info.get("name", s_id.capitalize())
         active_services.append((s_id, name, icon, total_hits, len(rids)))
         
-    # সেরা স্টক ও সর্বোচ্চ ওটিপি রেঞ্জ অনুযায়ী সার্ভিস অটো ফিল্টার ও সর্ট
+    # সেরা স্টক ও সর্বোচ্চ ওটিপি রেঞ্জ অনুযায়ী সার্ভিস সর্টিং
     active_services = sorted(active_services, key=lambda x: (x[3], x[4]), reverse=True)
 
     items_per_page = 4
@@ -713,7 +712,7 @@ def handle_service_pagination(call):
 def handle_noop(call):
     bot.answer_callback_query(call.id)
 
-# --- START COMMAND (ভাষা সিলেকশন ও চ্যানেল জয়েনিং) ---
+# --- START COMMAND ---
 @bot.message_handler(commands=['start'], chat_types=['private'])
 def start_bot(message):
     chat_id = message.chat.id
@@ -724,7 +723,6 @@ def start_bot(message):
         
     track_user(chat_id, referrer_id)
     
-    # জয়েনিং সাবস্ক্রিপশন চেক
     if not is_subscribed_all(chat_id):
         markup = types.InlineKeyboardMarkup()
         for ch in config.get("CHANNELS_TO_JOIN", []):
@@ -735,7 +733,6 @@ def start_bot(message):
         safe_send_message(chat_id, "⚠️ সার্ভিসটি ব্যবহার করতে নিচের সমস্ত চ্যানেল এবং গ্রুপগুলোতে অবশ্যই জয়েন করুন, এরপর 'Joined' বাটনে ক্লিক করুন।", reply_markup=markup)
         return
 
-    # ইউজার ল্যাঙ্গুয়েজ সেট না থাকলে প্রথমবার ভাষা সিলেক্ট করতে হবে
     u_data = db.get_user(chat_id)
     if not u_data.get("lang"):
         markup = types.InlineKeyboardMarkup()
@@ -757,7 +754,7 @@ def handle_first_language_choice(call):
     bot.answer_callback_query(call.id, text=msg_text)
     send_home_keyboard(call.message.chat.id)
 
-# --- ADMIN PANEL COMMAND COMMAND `/admin` ---
+# --- ADMIN PANEL COMMAND ---
 @bot.message_handler(commands=['admin'], chat_types=['private'])
 def handle_admin_command(message):
     if message.chat.id == int(config["ADMIN_ID"]):
@@ -1123,7 +1120,6 @@ def save_firebase_url(message):
     bot.send_message(message.chat.id, "✅ Firebase Database URL সফলভাবে সংযুক্ত করা হয়েছে!")
     show_admin_dashboard(message.chat.id)
 
-# --- ব্রডকাস্টিং প্রসেস ---
 def process_broadcast(message):
     chat_id = message.chat.id
     success = 0
@@ -1313,7 +1309,7 @@ def save_api_key(message):
     bot.send_message(message.chat.id, "✅ Zenex API Key আপডেট হয়েছে।")
     show_admin_dashboard(message.chat.id)
 
-# --- ডাইনামিক কান্ট্রি শো করা (Best Active Country Always Top) ---
+# --- ডাইনামিক কান্ট্রি শো করা ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("app_"))
 def show_countries(call):
     selected_app = call.data.split("_")[1]
@@ -1324,7 +1320,6 @@ def show_countries(call):
     
     available_countries = list(rids.keys())
     
-    # যে সকল কান্ট্রির সাকসেস রেট/হিটস বেশি সেগুলো সবার উপরে অটোমেটিক সাজানো থাকবে
     available_countries = sorted(
         available_countries,
         key=lambda c: (range_hits_count.get(format_rid(rids[c]), 0), get_country_activity_score(selected_app, rids[c])),
@@ -1351,13 +1346,17 @@ def show_countries(call):
     try: bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=text, reply_markup=markup, parse_mode="Markdown")
     except: safe_send_message(call.message.chat.id, text, reply_markup=markup)
 
-# --- GET NUMBER ENGINE ---
+# --- GET NUMBER ENGINE (100% REAL LIVE RANGES ONLY) ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("c_"))
 def request_number(call):
     _, country, selected_app = call.data.split("_")
     rid = config["SERVICES"][selected_app]["rids"].get(country)
-    formatted_rid = format_rid(rid)
     
+    if not rid:
+        bot.answer_callback_query(call.id, text="⚠️ বর্তমানে এই দেশের কোনো রেঞ্জ খুঁজে পাওয়া যায়নি!", show_alert=True)
+        return
+        
+    formatted_rid = format_rid(rid)
     base_url = str(config['BASE_URL']).strip().rstrip('/')
     url = f"{base_url}/getnum"
     
@@ -1371,7 +1370,7 @@ def request_number(call):
         response = requests.post(url, json=payload, headers=get_api_headers(), timeout=20)
         
         if response.status_code == 400 or response.status_code != 200:
-            bot.answer_callback_query(call.id, text="⚠️ এই কান্ট্রির স্টক এই মুহূর্তে শেষ বা সাময়িক বন্ধ! অনুগ্রহ করে অন্য একটি সচল দেশ বা সার্ভিস চেষ্টা করুন।", show_alert=True)
+            bot.answer_callback_query(call.id, text="⚠️ এই সচল রেঞ্জের স্টক এই মুহূর্তে খালি! একটু পর চেষ্টা করুন।", show_alert=True)
             return
             
         res = response.json()
@@ -1431,7 +1430,7 @@ def manual_fetch(call):
     
     found = check_and_send_otp_manual(call.message.chat.id, selected_app, country, num, call.message.message_id)
     if not found:
-        bot.answer_callback_query(call.id, text="⚠️ ওটিপি এখনো আসেনি! অটোমেটিক ডায়াল করা হচ্ছে, সাথেই থাকুন...", show_alert=True)
+        bot.answer_callback_query(call.id, text="⚠️ ওটিপি এখনো আসেনি! অটোমেটিক ট্রাই করা হচ্ছে, সাথেই থাকুন...", show_alert=True)
 
 def check_and_send_otp_manual(chat_id, selected_app, country, num, message_id=None):
     base_url = str(config['BASE_URL']).strip().rstrip('/')
@@ -1706,10 +1705,12 @@ def handle_admin_withdraw_action(call):
         try: safe_send_message(user_id, user_msg)
         except: pass
 
-# --- STRICT SERVICE DETECTOR FROM SMS CONTENT ---
+# --- STRICT SERVICE DETECTOR FROM SMS CONTENT & API METADATA ---
 def detect_service_from_message(msg_body, fallback_platform=""):
     body_lower = str(msg_body).lower()
+    plat_lower = str(fallback_platform).lower().strip()
     
+    # Check explicitly from SMS Text
     if any(kw in body_lower for kw in ["instagram", "ig-", "ig code", "insta", "ig_"]):
         return "instagram"
     elif any(kw in body_lower for kw in ["facebook", "fb-", "fb code", "meta"]):
@@ -1724,16 +1725,17 @@ def detect_service_from_message(msg_body, fallback_platform=""):
         return "discord"
     elif any(kw in body_lower for kw in ["tiktok", "tt code", "tt-"]):
         return "tiktok"
-    
-    plat_lower = str(fallback_platform).lower().strip()
+        
+    # Check from API fallback tag
     if plat_lower in ["tg", "telegram"]: return "telegram"
     elif plat_lower in ["ig", "instagram", "ins", "insta", "inst"]: return "instagram"
     elif plat_lower in ["fb", "facebook"]: return "facebook"
     elif plat_lower in ["wa", "whatsapp"]: return "whatsapp"
     elif plat_lower in ["tt", "tiktok"]: return "tiktok"
-    elif plat_lower in ["imo", "discord"]: return plat_lower
+    elif plat_lower in ["imo"]: return "imo"
+    elif plat_lower in ["discord"]: return "discord"
     
-    return "facebook"
+    return "facebook" # Default safe fallback
 
 # --- SMS / OTP LIVE MONITOR ENGINE (FORWARD REALTIME HITS TO OTP GROUP) ---
 def background_live_sms_monitor():
@@ -1776,6 +1778,7 @@ def background_live_sms_monitor():
                     range_val = num_clean[:8] + "XXX" if len(num_clean) >= 8 else "Global"
                     country_name = get_country_info_by_range(num)
                     
+                    # কড়া ম্যাচিং: সঠিক সার্ভিস ফোল্ডারে সচল রেঞ্জ আপডেট হবে
                     if range_val != "Global" and platform in config["SERVICES"]:
                         active_ranges_global.add(range_val)
                         config["SERVICES"][platform]["rids"][country_name] = range_val
@@ -1836,7 +1839,6 @@ def sync_services_once():
                     range_hits_count[clean_r] = hits
                     active_ranges_global.add(clean_r)
                     
-                    # সার্ভিস ম্যাপিং
                     if service_raw in ["tg", "telegram"]: service_id = "telegram"
                     elif service_raw in ["ig", "instagram", "ins", "insta", "inst"]: service_id = "instagram"
                     elif service_raw in ["fb", "facebook"]: service_id = "facebook"
@@ -1846,7 +1848,6 @@ def sync_services_once():
                     elif service_raw in ["discord"]: service_id = "discord"
                     else: service_id = service_raw
                     
-                    icon = get_service_icon(service_id)
                     country_name = get_country_info_by_range(clean_r)
                     
                     if service_id in config["SERVICES"]:
