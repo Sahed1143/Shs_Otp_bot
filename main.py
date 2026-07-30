@@ -60,12 +60,11 @@ class DatabaseManager:
                     if "referrer" not in u_data: u_data["referrer"] = None
                     if "ref_earnings" not in u_data: u_data["ref_earnings"] = 0.0
                     if "ref_count" not in u_data: u_data["ref_count"] = 0
-                    if "lang" not in u_data: u_data["lang"] = "bn"
+                    if "lang" not in u_data: u_data["lang"] = None
                     return u_data
             except Exception as e:
                 print(f"Firebase get_user error: {e}")
         
-        # Local fallback
         if uid not in self.local_data["users"]:
             self.local_data["users"][uid] = {
                 "balance": 0.0, 
@@ -74,7 +73,7 @@ class DatabaseManager:
                 "referrer": None,
                 "ref_earnings": 0.0,
                 "ref_count": 0,
-                "lang": "bn"
+                "lang": None
             }
             self._save_local()
         else:
@@ -82,7 +81,7 @@ class DatabaseManager:
             if "referrer" not in u_data: u_data["referrer"] = None
             if "ref_earnings" not in u_data: u_data["ref_earnings"] = 0.0
             if "ref_count" not in u_data: u_data["ref_count"] = 0
-            if "lang" not in u_data: u_data["lang"] = "bn"
+            if "lang" not in u_data: u_data["lang"] = None
             self.local_data["users"][uid] = u_data
         return self.local_data["users"][uid]
 
@@ -241,9 +240,7 @@ def load_config():
             "telegram": {"name": "✈️ Telegram", "rids": {}},
             "imo": {"name": "📱 Imo", "rids": {}},
             "tiktok": {"name": "🎵 TikTok", "rids": {}},
-            "discord": {"name": "👾 Discord", "rids": {}},
-            "uber": {"name": "🚗 Uber", "rids": {}},
-            "hsbc": {"name": "🏦 HSBC", "rids": {}}
+            "discord": {"name": "👾 Discord", "rids": {}}
         }
     }
     
@@ -307,7 +304,7 @@ bot = telebot.TeleBot(config["BOT_TOKEN"])
 app = Flask('')
 admin_temp_data = {}
 
-# --- Comprehensive Prefix to Country & Flag Resolver ---
+# --- Comprehensive Prefix to Country Resolver ---
 def get_country_info_by_range(range_val):
     if not range_val:
         return "Global 🌐"
@@ -442,7 +439,7 @@ def get_country_info_by_range(range_val):
 
 def get_country_code_short(range_val):
     info = get_country_info_by_range(range_val)
-    if " Central African" in info: return "CF"
+    if "Central African" in info: return "CF"
     if "Guinea" in info: return "GN"
     if "Liberia" in info: return "LR"
     if "Ivory Coast" in info: return "CI"
@@ -621,7 +618,7 @@ def get_otp_group_link():
 def send_home_keyboard(chat_id, text=None):
     track_user(chat_id)
     u_data = db.get_user(chat_id)
-    lang = u_data.get("lang", "bn")
+    lang = u_data.get("lang", "bn") or "bn"
     bot_name = config.get("BOT_NAME", "👑 SHS OTP HUB 👑")
     
     if not text:
@@ -642,15 +639,14 @@ def send_home_keyboard(chat_id, text=None):
         markup.row(types.KeyboardButton("🔑 2FA CODE"), types.KeyboardButton("📊 Live Traffic"))
         markup.row(types.KeyboardButton("🌐 ভাষা পরিবর্তন"), types.KeyboardButton("💬 Support"))
     
-    if chat_id == int(config["ADMIN_ID"]):
-        markup.row(types.KeyboardButton("🛠 Admin Dashboard"))
+    # অ্যাডমিন বাটন এখান থেকে হাইড রাখা হয়েছে। শুধু /admin কমান্ড কাজ করবে।
     safe_send_message(chat_id, text, reply_markup=markup)
 
-# --- ডায়নামিক ইনলাইন সার্ভিস মেনু ---
+# --- ডায়নামিক ইনলাইন সার্ভিস মেনু (হাই-স্পিড সেরা সার্ভিস সার্ভিস উপরে থাকবে) ---
 def send_services_menu(chat_id, message_id=None, page=0):
     track_user(chat_id)
     u_data = db.get_user(chat_id)
-    lang = u_data.get("lang", "bn")
+    lang = u_data.get("lang", "bn") or "bn"
     
     markup = types.InlineKeyboardMarkup()
     services = config.get("SERVICES", {})
@@ -658,18 +654,18 @@ def send_services_menu(chat_id, message_id=None, page=0):
     active_services = []
     for s_id, s_info in services.items():
         rids = s_info.get("rids", {})
-        total_hits = sum(range_hits_count.get(format_rid(r_val), 0) for r_val in rids.values())
+        total_hits = 0
+        for r_val in rids.values():
+            clean_r = format_rid(r_val)
+            total_hits += range_hits_count.get(clean_r, 0)
+            total_hits += len([t for (r, p), times in range_hits_tracker.items() if format_rid(r) == clean_r for t in times])
+            
         icon = get_service_icon(s_id)
         name = s_info.get("name", s_id.capitalize())
         active_services.append((s_id, name, icon, total_hits, len(rids)))
         
-    # সেরা হিট ও স্টক অনুযায়ী সার্ভিস ফিল্টার
+    # সেরা স্টক ও সর্বোচ্চ ওটিপি রেঞ্জ অনুযায়ী সার্ভিস অটো ফিল্টার ও সর্ট
     active_services = sorted(active_services, key=lambda x: (x[3], x[4]), reverse=True)
-    
-    if not active_services:
-        for s_id in ["facebook", "instagram", "whatsapp", "telegram", "imo", "tiktok", "discord"]:
-            icon = get_service_icon(s_id)
-            active_services.append((s_id, f"{icon} {s_id.capitalize()}", icon, 0, 0))
 
     items_per_page = 4
     total_pages = max(1, (len(active_services) + items_per_page - 1) // items_per_page)
@@ -717,6 +713,7 @@ def handle_service_pagination(call):
 def handle_noop(call):
     bot.answer_callback_query(call.id)
 
+# --- START COMMAND (ভাষা সিলেকশন ও চ্যানেল জয়েনিং) ---
 @bot.message_handler(commands=['start'], chat_types=['private'])
 def start_bot(message):
     chat_id = message.chat.id
@@ -727,9 +724,8 @@ def start_bot(message):
         
     track_user(chat_id, referrer_id)
     
-    if is_subscribed_all(chat_id):
-        send_home_keyboard(chat_id)
-    else:
+    # জয়েনিং সাবস্ক্রিপশন চেক
+    if not is_subscribed_all(chat_id):
         markup = types.InlineKeyboardMarkup()
         for ch in config.get("CHANNELS_TO_JOIN", []):
             markup.row(types.InlineKeyboardButton(ch["name"], url=ch["link"]))
@@ -737,12 +733,43 @@ def start_bot(message):
             markup.row(types.InlineKeyboardButton(grp["name"], url=grp["link"]))
         markup.row(types.InlineKeyboardButton("✅ Joined (Check)", callback_data="check_membership"))
         safe_send_message(chat_id, "⚠️ সার্ভিসটি ব্যবহার করতে নিচের সমস্ত চ্যানেল এবং গ্রুপগুলোতে অবশ্যই জয়েন করুন, এরপর 'Joined' বাটনে ক্লিক করুন।", reply_markup=markup)
+        return
+
+    # ইউজার ল্যাঙ্গুয়েজ সেট না থাকলে প্রথমবার ভাষা সিলেক্ট করতে হবে
+    u_data = db.get_user(chat_id)
+    if not u_data.get("lang"):
+        markup = types.InlineKeyboardMarkup()
+        markup.row(
+            types.InlineKeyboardButton("English 🇬🇧", callback_data="firstlang_en"),
+            types.InlineKeyboardButton("বাংলা 🇧🇩", callback_data="firstlang_bn")
+        )
+        safe_send_message(chat_id, "🌐 **Please Select Your Language / আপনার ভাষা বেছে নিন:**", reply_markup=markup)
+    else:
+        send_home_keyboard(chat_id)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("firstlang_"))
+def handle_first_language_choice(call):
+    lang_code = call.data.split("_")[1]
+    db.set_user_language(call.from_user.id, lang_code)
+    try: bot.delete_message(call.message.chat.id, call.message.message_id)
+    except: pass
+    msg_text = "✅ Language set to English!" if lang_code == "en" else "✅ ভাষা বাংলা সিলেক্ট করা হয়েছে!"
+    bot.answer_callback_query(call.id, text=msg_text)
+    send_home_keyboard(call.message.chat.id)
+
+# --- ADMIN PANEL COMMAND COMMAND `/admin` ---
+@bot.message_handler(commands=['admin'], chat_types=['private'])
+def handle_admin_command(message):
+    if message.chat.id == int(config["ADMIN_ID"]):
+        show_admin_dashboard(message.chat.id)
+    else:
+        safe_send_message(message.chat.id, "❌ আপনি এই কমান্ডটি ব্যবহারের অনুমতি পাননি।")
 
 @bot.message_handler(func=lambda m: True, chat_types=['private'])
 def handle_text(message):
     track_user(message.chat.id)
     u_data = db.get_user(message.chat.id)
-    lang = u_data.get("lang", "bn")
+    lang = u_data.get("lang", "bn") or "bn"
     
     if not is_subscribed_all(message.chat.id):
         markup = types.InlineKeyboardMarkup()
@@ -820,8 +847,6 @@ def handle_text(message):
             markup.add(types.InlineKeyboardButton(f"💬 {grp['name']}", url=grp['link']))
         markup.add(types.InlineKeyboardButton("📞 Admin Support", url=f"https://t.me/{config.get('DEV_USERNAME', 'Saku_143')}"))
         safe_send_message(message.chat.id, "💬 **Support & Help:**", reply_markup=markup)
-    elif text == "🛠 Admin Dashboard" and message.chat.id == int(config["ADMIN_ID"]):
-        show_admin_dashboard(message.chat.id)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("setlang_"))
 def handle_set_language(call):
@@ -971,7 +996,7 @@ def handle_admin_callbacks(call):
                               reply_markup=markup, parse_mode="Markdown")
         
     elif data == "adm_addcustom":
-        msg = bot.send_message(chat_id, "✍️ নতুন কাস্টম অ্যাপের নাম লিখুন (যেমন: `telegram` বা `netflix`):")
+        msg = bot.send_message(chat_id, "✍️ নতুন কাস্টম অ্যাপের নাম লিখুন (যেমন: `uber` বা `netflix`):")
         bot.register_next_step_handler(msg, wizard_get_custom_app_name)
         
     elif data == "adm_delrid":
@@ -1098,13 +1123,12 @@ def save_firebase_url(message):
     bot.send_message(message.chat.id, "✅ Firebase Database URL সফলভাবে সংযুক্ত করা হয়েছে!")
     show_admin_dashboard(message.chat.id)
 
-# --- ফিক্সড ব্রডকাস্টিং প্রসেস (ALL USERS RECOVERY) ---
+# --- ব্রডকাস্টিং প্রসেস ---
 def process_broadcast(message):
     chat_id = message.chat.id
     success = 0
     failed = 0
     
-    # সব ডাটাবেজ সোর্স থেকে ইউজারদের সঠিকভাবে তালিকাভুক্ত করা
     all_target_users = list(set(all_users).union(db.get_all_user_ids()))
     target_users = [int(uid) for uid in all_target_users if int(uid) > 0 and int(uid) != int(config["ADMIN_ID"])]
     
@@ -1120,7 +1144,7 @@ def process_broadcast(message):
             success += 1
             time.sleep(0.04)
         except telebot.apihelper.ApiTelegramException as e:
-            if e.error_code == 429: # Telegram Rate Limit Handler
+            if e.error_code == 429:
                 retry_after = e.result_json.get('parameters', {}).get('retry_after', 3)
                 time.sleep(retry_after + 1)
                 try:
@@ -1300,7 +1324,7 @@ def show_countries(call):
     
     available_countries = list(rids.keys())
     
-    # সক্রিয় ও বেশি হিট পাওয়া কান্ট্রিগুলোকে উপরে রাখা
+    # যে সকল কান্ট্রির সাকসেস রেট/হিটস বেশি সেগুলো সবার উপরে অটোমেটিক সাজানো থাকবে
     available_countries = sorted(
         available_countries,
         key=lambda c: (range_hits_count.get(format_rid(rids[c]), 0), get_country_activity_score(selected_app, rids[c])),
@@ -1327,7 +1351,7 @@ def show_countries(call):
     try: bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=text, reply_markup=markup, parse_mode="Markdown")
     except: safe_send_message(call.message.chat.id, text, reply_markup=markup)
 
-# --- GET NUMBER ENGINE (SAFE FROM 400 ERROR) ---
+# --- GET NUMBER ENGINE ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("c_"))
 def request_number(call):
     _, country, selected_app = call.data.split("_")
@@ -1346,7 +1370,6 @@ def request_number(call):
     try:
         response = requests.post(url, json=payload, headers=get_api_headers(), timeout=20)
         
-        # 400 Bad Request / Stock empty handling
         if response.status_code == 400 or response.status_code != 200:
             bot.answer_callback_query(call.id, text="⚠️ এই কান্ট্রির স্টক এই মুহূর্তে শেষ বা সাময়িক বন্ধ! অনুগ্রহ করে অন্য একটি সচল দেশ বা সার্ভিস চেষ্টা করুন।", show_alert=True)
             return
@@ -1431,7 +1454,6 @@ def check_and_send_otp_manual(chat_id, selected_app, country, num, message_id=No
             if found_msg:
                 current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 bot_title = config.get("BOT_NAME", "👑 SHS OTP HUB 👑")
-                bot_user = config.get("BOT_USERNAME", "SHS_SMSHUB_bot")
                 
                 code_match = re.search(r'\b\d{4,8}\b', found_msg)
                 isolated_code = code_match.group(0) if code_match else found_msg[:10]
@@ -1713,7 +1735,7 @@ def detect_service_from_message(msg_body, fallback_platform=""):
     
     return "facebook"
 
-# --- SMS / OTP Live Monitor Engine (FORWARD REALTIME HITS TO OTP GROUP) ---
+# --- SMS / OTP LIVE MONITOR ENGINE (FORWARD REALTIME HITS TO OTP GROUP) ---
 def background_live_sms_monitor():
     global seen_console_hits, range_hits_tracker, last_announced_range
     while True:
@@ -1754,10 +1776,8 @@ def background_live_sms_monitor():
                     range_val = num_clean[:8] + "XXX" if len(num_clean) >= 8 else "Global"
                     country_name = get_country_info_by_range(num)
                     
-                    if range_val != "Global":
+                    if range_val != "Global" and platform in config["SERVICES"]:
                         active_ranges_global.add(range_val)
-                        if platform not in config["SERVICES"]:
-                            config["SERVICES"][platform] = {"name": f"{icon} {platform.capitalize()}", "rids": {}}
                         config["SERVICES"][platform]["rids"][country_name] = range_val
                         save_config(config)
                     
@@ -1772,7 +1792,6 @@ def background_live_sms_monitor():
                     
                     bot_user = config.get("BOT_USERNAME", "SHS_SMSHUB_bot")
                     
-                    # লাইভ হিট গ্রুপ ফরোয়ার্ড ফরম্যাট
                     live_alert = (f"**{platform.upper()} SMS Number x TNE**              `Admin` \n"
                                   f"🇨🇫 {country_short} | {icon} | 📱 `{masked_num}` | 🔊 English \n\n"
                                   f"💬 Message:\n`{msg_body}`")
@@ -1784,7 +1803,6 @@ def background_live_sms_monitor():
                     )
                     markup.row(types.InlineKeyboardButton("📞 Get Number ↗️", url=f"https://t.me/{bot_user}?start=getnum_{platform}"))
                     
-                    # ওটিপি গ্রুপে মেসেজ সেন্ড
                     for dest_id in config.get("OTP_DESTINATIONS", []):
                         try:
                             safe_send_message(int(dest_id), live_alert, reply_markup=markup)
@@ -1793,7 +1811,7 @@ def background_live_sms_monitor():
             print(f"Monitor loop error: {e}")
             time.sleep(4)
 
-# --- Active Ranges Sync Engine (STRICT NO MIXING) ---
+# --- ACTIVE RANGES SYNC ENGINE ---
 def sync_services_once():
     global active_ranges_global, range_hits_count
     try:
@@ -1818,7 +1836,7 @@ def sync_services_once():
                     range_hits_count[clean_r] = hits
                     active_ranges_global.add(clean_r)
                     
-                    # কড়া সার্ভিস ফিল্টারিং
+                    # সার্ভিস ম্যাপিং
                     if service_raw in ["tg", "telegram"]: service_id = "telegram"
                     elif service_raw in ["ig", "instagram", "ins", "insta", "inst"]: service_id = "instagram"
                     elif service_raw in ["fb", "facebook"]: service_id = "facebook"
@@ -1831,9 +1849,8 @@ def sync_services_once():
                     icon = get_service_icon(service_id)
                     country_name = get_country_info_by_range(clean_r)
                     
-                    if service_id not in config["SERVICES"]:
-                        config["SERVICES"][service_id] = {"name": f"{icon} {service_id.capitalize()}", "rids": {}}
-                    config["SERVICES"][service_id]["rids"][country_name] = clean_r
+                    if service_id in config["SERVICES"]:
+                        config["SERVICES"][service_id]["rids"][country_name] = clean_r
                 
                 save_config(config)
     except Exception as e:
