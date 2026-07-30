@@ -204,7 +204,7 @@ class DatabaseManager:
 
 def load_config():
     default_config = {
-        "BOT_TOKEN": "8979736100:AAG_8ILyTgjuWxpSG1v2kgdRWv4nCPeycws", 
+        "BOT_TOKEN": "8979736100:AAGisd9PFE9jwtThFCKR-TAPqkgbsTIZDVs", 
         "ZENEX_API_KEY": "ZNX_GWKKMCVK6JX425VXRTVP5NYV",  
         "BASE_URL": "https://api.zenexnetwork.com/v1", 
         "ADMIN_ID": 8262679678,
@@ -307,17 +307,17 @@ bot = telebot.TeleBot(config["BOT_TOKEN"])
 app = Flask('')
 admin_temp_data = {}
 
-# --- Format RID Function (Strict 6 digits + XXX to prevent API status 400) ---
+# --- Safe RID Formatter (Strict Zenex 6 digits + XXX) ---
 def format_rid(rid):
     if not rid:
-        return "447384XXX"
+        return "236749XXX"
     rid_str = str(rid).strip().upper()
-    clean_digits = re.sub(r'[^0-9]', '', rid_str)
-    if len(clean_digits) >= 6:
-        return f"{clean_digits[:6]}XXX"
-    elif len(clean_digits) > 0:
-        return f"{clean_digits}XXX"
-    return "447384XXX"
+    digits = re.sub(r'[^0-9]', '', rid_str)
+    if len(digits) >= 6:
+        return f"{digits[:6]}XXX"
+    elif len(digits) > 0:
+        return f"{digits}XXX"
+    return "236749XXX"
 
 # --- Comprehensive Prefix to Country & Flag Resolver ---
 def get_country_info_by_range(range_val):
@@ -652,7 +652,7 @@ def send_home_keyboard(chat_id, text=None):
         markup.row(types.KeyboardButton("🛠 Admin Dashboard"))
     safe_send_message(chat_id, text, reply_markup=markup)
 
-# --- ডায়নামিক ইনলাইন সার্ভিস মেনু (প্রতি পেজে ৪টি সেরা সার্ভিস + Pagination) ---
+# --- ডায়নামিক ইনলাইন সার্ভিস মেনু ---
 def send_services_menu(chat_id, message_id=None, page=0):
     track_user(chat_id)
     u_data = db.get_user(chat_id)
@@ -733,7 +733,6 @@ def start_bot(message):
         if arg.isdigit():
             referrer_id = int(arg)
         elif arg.startswith("getnum_"):
-            target_app = arg.replace("getnum_", "").lower()
             track_user(chat_id)
             if is_subscribed_all(chat_id):
                 send_services_menu(chat_id)
@@ -1289,7 +1288,7 @@ def save_api_key(message):
     bot.send_message(message.chat.id, "✅ Zenex API Key আপডেট হয়েছে।")
     show_admin_dashboard(message.chat.id)
 
-# --- ডাইনামিক কান্ট্রি শো করা (Best Active Country Always Top) ---
+# --- ডাইনামিক কান্ট্রি শো করা (নিরাপদ কলব্যাক ফরম্যাট) ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("app_"))
 def show_countries(call):
     selected_app = call.data.split("_")[1]
@@ -1311,7 +1310,9 @@ def show_countries(call):
         score = get_country_activity_score(selected_app, rids[country])
         hits = range_hits_count.get(format_rid(rids[country]), 0)
         badge = "🔥 " if (hits > 0 or score > 0) else "⭐ "
-        callback_data = f"c_{country}_{selected_app}"
+        
+        # নিরাপদ কলব্যাক ফরম্যাট (getn:app:country)
+        callback_data = f"getn:{selected_app}:{country}"
         btn_text = f"{badge}{country}"
         
         row.append(types.InlineKeyboardButton(btn_text, callback_data=callback_data))
@@ -1326,30 +1327,37 @@ def show_countries(call):
     try: bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=text, reply_markup=markup, parse_mode="Markdown")
     except: safe_send_message(call.message.chat.id, text, reply_markup=markup)
 
-# --- GET NUMBER ENGINE (Fixing API Status 400) ---
-@bot.callback_query_handler(func=lambda call: call.data.startswith("c_"))
+# --- GET NUMBER ENGINE (Fixing API Status 400 completely) ---
+@bot.callback_query_handler(func=lambda call: call.data.startswith("getn:"))
 def request_number(call):
-    _, country, selected_app = call.data.split("_")
-    rid = config["SERVICES"][selected_app]["rids"].get(country)
-    
-    # ৭-৮ বা ভুল অক্ষরের বদলে নিশ্চিতভাবে সঠিক ৬ ডিজিট + XXX রেঞ্জ ফরম্যাট তৈরি
-    formatted_rid = format_rid(rid)
-    
-    base_url = str(config['BASE_URL']).strip().rstrip('/')
-    url = f"{base_url}/getnum"
-    
-    payload = {
-        "range": str(formatted_rid),
-        "is_national": False,
-        "remove_plus": False
-    }
-    
     try:
+        parts = call.data.split(":", 2)
+        selected_app = parts[1]
+        country = parts[2]
+        
+        rid = config.get("SERVICES", {}).get(selected_app, {}).get("rids", {}).get(country)
+        formatted_rid = format_rid(rid)
+        
+        base_url = str(config['BASE_URL']).strip().rstrip('/')
+        url = f"{base_url}/getnum"
+        
+        payload = {
+            "range": str(formatted_rid),
+            "is_national": False,
+            "remove_plus": False
+        }
+        
         response = requests.post(url, json=payload, headers=get_api_headers(), timeout=20)
         if response.status_code != 200:
-            bot.answer_callback_query(call.id, text=f"❌ API Status: {response.status_code}", show_alert=True)
+            err_msg = f"❌ API Status: {response.status_code}"
+            try:
+                err_json = response.json()
+                if "message" in err_json:
+                    err_msg = f"❌ {err_json['message']}"
+            except: pass
+            bot.answer_callback_query(call.id, text=err_msg, show_alert=True)
             return
-            
+                
         res = response.json()
         meta = res.get("meta", {})
         
@@ -1372,7 +1380,7 @@ def request_number(call):
             markup = types.InlineKeyboardMarkup()
             markup.row(
                 types.InlineKeyboardButton("🔄 Fetch Code (Manual)", callback_data=f"fetch_{selected_app}_{country}_{num_raw}"),
-                types.InlineKeyboardButton("🔄 Change Number", callback_data=f"c_{country}_{selected_app}")
+                types.InlineKeyboardButton("🔄 Change Number", callback_data=f"getn:{selected_app}:{country}")
             )
             markup.row(types.InlineKeyboardButton("📋 Copy Number", callback_data=f"copynum_{full_num}"))
             markup.row(types.InlineKeyboardButton("🔗 View OTP Group", url=get_otp_group_link()))
@@ -1384,7 +1392,8 @@ def request_number(call):
         else:
             bot.answer_callback_query(call.id, text=f"❌ Panel Notice: {res.get('message', 'নম্বর স্টক শেষ')}", show_alert=True)
     except Exception as e:
-        bot.answer_callback_query(call.id, text="⚠️ কানেকশন সমস্যা! আবার ট্রাই করুন।", show_alert=True)
+        print(f"Error in request_number: {e}")
+        bot.answer_callback_query(call.id, text="⚠️ নম্বর জেনারেট করতে সমস্যা হয়েছে, আবার চেষ্টা করুন!", show_alert=True)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("copynum_"))
 def copy_number_alert(call):
@@ -1792,7 +1801,7 @@ def background_live_sms_monitor():
             print(f"Monitor loop error: {e}")
             time.sleep(3)
 
-# --- Active Ranges Sync Engine (সার্ভিস নিখুঁতভাবে ম্যাপ করার ফিক্স) ---
+# --- Active Ranges Sync Engine ---
 def sync_services_once():
     global active_ranges_global, range_hits_count
     try:
@@ -1871,7 +1880,12 @@ if __name__ == "__main__":
     Thread(target=background_live_sms_monitor, daemon=True).start()
     Thread(target=background_services_sync, daemon=True).start()
     
-    try: bot.delete_webhook(drop_pending_updates=True)
-    except: pass
-    print("🚀 SHS OTP HUB Premium Multi-Threaded Bot রানিং...")
-    bot.polling(none_stop=True)
+    # 409 Conflict সুরক্ষিত Polling ব্যবস্থা
+    while True:
+        try:
+            bot.delete_webhook(drop_pending_updates=True)
+            print("🚀 SHS OTP HUB Bot রানিং...")
+            bot.polling(none_stop=True, timeout=60, long_polling_timeout=60)
+        except Exception as e:
+            print(f"Polling conflict or network drop: {e}")
+            time.sleep(5)
