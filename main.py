@@ -646,7 +646,7 @@ def send_home_keyboard(chat_id, text=None):
         markup.row(types.KeyboardButton("🛠 Admin Dashboard"))
     safe_send_message(chat_id, text, reply_markup=markup)
 
-# --- ডায়নামিক ইনলাইন সার্ভিস মেনু (প্রতি পেজে ৪টি সেরা সার্ভিস + Pagination) ---
+# --- ডায়নামিক ইনলাইন সার্ভিস মেনু ---
 def send_services_menu(chat_id, message_id=None, page=0):
     track_user(chat_id)
     u_data = db.get_user(chat_id)
@@ -655,7 +655,6 @@ def send_services_menu(chat_id, message_id=None, page=0):
     markup = types.InlineKeyboardMarkup()
     services = config.get("SERVICES", {})
     
-    # সক্রিয় রেঞ্জ রয়েছে এমন সার্ভিসগুলোকে বাছাই করে ফিল্টার করা
     active_services = []
     for s_id, s_info in services.items():
         rids = s_info.get("rids", {})
@@ -664,7 +663,7 @@ def send_services_menu(chat_id, message_id=None, page=0):
         name = s_info.get("name", s_id.capitalize())
         active_services.append((s_id, name, icon, total_hits, len(rids)))
         
-    # সেরা স্টক/হিট অনুযায়ী সাজানো
+    # সেরা হিট ও স্টক অনুযায়ী সার্ভিস ফিল্টার
     active_services = sorted(active_services, key=lambda x: (x[3], x[4]), reverse=True)
     
     if not active_services:
@@ -672,9 +671,8 @@ def send_services_menu(chat_id, message_id=None, page=0):
             icon = get_service_icon(s_id)
             active_services.append((s_id, f"{icon} {s_id.capitalize()}", icon, 0, 0))
 
-    # প্রতি পেজে ৪টি করে সার্ভিস প্রদর্শন
     items_per_page = 4
-    total_pages = (len(active_services) + items_per_page - 1) // items_per_page
+    total_pages = max(1, (len(active_services) + items_per_page - 1) // items_per_page)
     page = max(0, min(page, total_pages - 1))
     
     start_idx = page * items_per_page
@@ -692,7 +690,6 @@ def send_services_menu(chat_id, message_id=None, page=0):
     if row:
         markup.row(*row)
         
-    # পেজিনেশন নেভিগেশন বাটন
     nav_buttons = []
     if page > 0:
         nav_buttons.append(types.InlineKeyboardButton("⬅️ Prev", callback_data=f"page_{page-1}"))
@@ -929,7 +926,7 @@ def show_admin_dashboard(chat_id):
     bot_title = config.get("BOT_NAME", "👑 SHS OTP HUB 👑")
     bot_user = config.get("BOT_USERNAME", "SHS_SMSHUB_bot")
     
-    all_db_uids = db.get_all_user_ids()
+    all_db_uids = list(set(all_users).union(db.get_all_user_ids()))
     text = (f"🛠 **Admin Control Panel**\n\n"
             f"• Bot Name: `{bot_title}`\n"
             f"• Bot Username: `@{bot_user}`\n"
@@ -1101,25 +1098,39 @@ def save_firebase_url(message):
     bot.send_message(message.chat.id, "✅ Firebase Database URL সফলভাবে সংযুক্ত করা হয়েছে!")
     show_admin_dashboard(message.chat.id)
 
+# --- ফিক্সড ব্রডকাস্টিং প্রসেস (ALL USERS RECOVERY) ---
 def process_broadcast(message):
     chat_id = message.chat.id
     success = 0
     failed = 0
     
-    all_db_users = list(db.get_all_user_ids())
-    target_users = [uid for uid in all_db_users if int(uid) != int(config["ADMIN_ID"])]
+    # সব ডাটাবেজ সোর্স থেকে ইউজারদের সঠিকভাবে তালিকাভুক্ত করা
+    all_target_users = list(set(all_users).union(db.get_all_user_ids()))
+    target_users = [int(uid) for uid in all_target_users if int(uid) > 0 and int(uid) != int(config["ADMIN_ID"])]
     
     if not target_users:
         bot.send_message(chat_id, "❌ **ব্রডকাস্ট ব্যর্থ!**\n\nডাটাবেজে কোনো ইউজার পাওয়া যায়নি।", parse_mode="Markdown")
         return
         
     status_msg = bot.send_message(chat_id, f"🚀 **{len(target_users)} জন ইউজারের কাছে ব্রডকাস্ট শুরু হয়েছে...**")
+    
     for uid in target_users:
         try:
             bot.copy_message(chat_id=int(uid), from_chat_id=chat_id, message_id=message.message_id)
             success += 1
             time.sleep(0.04)
-        except Exception as e:
+        except telebot.apihelper.ApiTelegramException as e:
+            if e.error_code == 429: # Telegram Rate Limit Handler
+                retry_after = e.result_json.get('parameters', {}).get('retry_after', 3)
+                time.sleep(retry_after + 1)
+                try:
+                    bot.copy_message(chat_id=int(uid), from_chat_id=chat_id, message_id=message.message_id)
+                    success += 1
+                except:
+                    failed += 1
+            else:
+                failed += 1
+        except Exception:
             failed += 1
             
     bot.edit_message_text(chat_id=chat_id, message_id=status_msg.message_id, 
@@ -1289,6 +1300,7 @@ def show_countries(call):
     
     available_countries = list(rids.keys())
     
+    # সক্রিয় ও বেশি হিট পাওয়া কান্ট্রিগুলোকে উপরে রাখা
     available_countries = sorted(
         available_countries,
         key=lambda c: (range_hits_count.get(format_rid(rids[c]), 0), get_country_activity_score(selected_app, rids[c])),
@@ -1315,7 +1327,7 @@ def show_countries(call):
     try: bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=text, reply_markup=markup, parse_mode="Markdown")
     except: safe_send_message(call.message.chat.id, text, reply_markup=markup)
 
-# --- GET NUMBER ENGINE ---
+# --- GET NUMBER ENGINE (SAFE FROM 400 ERROR) ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("c_"))
 def request_number(call):
     _, country, selected_app = call.data.split("_")
@@ -1333,8 +1345,10 @@ def request_number(call):
     
     try:
         response = requests.post(url, json=payload, headers=get_api_headers(), timeout=20)
-        if response.status_code != 200:
-            bot.answer_callback_query(call.id, text=f"❌ API Status: {response.status_code}", show_alert=True)
+        
+        # 400 Bad Request / Stock empty handling
+        if response.status_code == 400 or response.status_code != 200:
+            bot.answer_callback_query(call.id, text="⚠️ এই কান্ট্রির স্টক এই মুহূর্তে শেষ বা সাময়িক বন্ধ! অনুগ্রহ করে অন্য একটি সচল দেশ বা সার্ভিস চেষ্টা করুন।", show_alert=True)
             return
             
         res = response.json()
@@ -1369,9 +1383,9 @@ def request_number(call):
             
             Thread(target=background_user_otp_watcher, args=(call.message.chat.id, call.message.message_id, selected_app, country, num_raw), daemon=True).start()
         else:
-            bot.answer_callback_query(call.id, text=f"❌ Panel Notice: {res.get('message', 'নম্বর স্টক শেষ')}", show_alert=True)
+            bot.answer_callback_query(call.id, text=f"❌ স্টক খালি: {res.get('message', 'অন্য একটি দেশ বেছে নিন')}", show_alert=True)
     except Exception as e:
-        bot.answer_callback_query(call.id, text="⚠️ কানেকশন সমস্যা! আবার ট্রাই করুন।", show_alert=True)
+        bot.answer_callback_query(call.id, text="⚠️ কানেকশন সমস্যা! আবার চেষ্টা করুন।", show_alert=True)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("copynum_"))
 def copy_number_alert(call):
@@ -1670,6 +1684,7 @@ def handle_admin_withdraw_action(call):
         try: safe_send_message(user_id, user_msg)
         except: pass
 
+# --- STRICT SERVICE DETECTOR FROM SMS CONTENT ---
 def detect_service_from_message(msg_body, fallback_platform=""):
     body_lower = str(msg_body).lower()
     
@@ -1698,7 +1713,7 @@ def detect_service_from_message(msg_body, fallback_platform=""):
     
     return "facebook"
 
-# --- SMS / OTP Live Monitor Engine (REALTIME ZENEX CONSOLE FEED TO GROUP) ---
+# --- SMS / OTP Live Monitor Engine (FORWARD REALTIME HITS TO OTP GROUP) ---
 def background_live_sms_monitor():
     global seen_console_hits, range_hits_tracker, last_announced_range
     while True:
@@ -1717,8 +1732,6 @@ def background_live_sms_monitor():
                     nid = item.get("nid", "")
                     msg_body = item.get("otp", "") or item.get("message", "")
                     num = item.get("number", "")
-                    operator_name = item.get("operator") or item.get("carrier") or "Mobile"
-                    country_name = item.get("country") or get_country_info_by_range(num)
                     
                     if not msg_body or not str(msg_body).strip():
                         continue
@@ -1739,6 +1752,7 @@ def background_live_sms_monitor():
                     
                     num_clean = str(num).replace("+", "").strip()
                     range_val = num_clean[:8] + "XXX" if len(num_clean) >= 8 else "Global"
+                    country_name = get_country_info_by_range(num)
                     
                     if range_val != "Global":
                         active_ranges_global.add(range_val)
@@ -1758,8 +1772,8 @@ def background_live_sms_monitor():
                     
                     bot_user = config.get("BOT_USERNAME", "SHS_SMSHUB_bot")
                     
-                    # ভিডিও এর মত গ্রুপ মেসেজ ফরম্যাট
-                    live_alert = (f"**FB SMS Number x TNE**              `Admin` \n"
+                    # লাইভ হিট গ্রুপ ফরোয়ার্ড ফরম্যাট
+                    live_alert = (f"**{platform.upper()} SMS Number x TNE**              `Admin` \n"
                                   f"🇨🇫 {country_short} | {icon} | 📱 `{masked_num}` | 🔊 English \n\n"
                                   f"💬 Message:\n`{msg_body}`")
                     
@@ -1770,18 +1784,16 @@ def background_live_sms_monitor():
                     )
                     markup.row(types.InlineKeyboardButton("📞 Get Number ↗️", url=f"https://t.me/{bot_user}?start=getnum_{platform}"))
                     
-                    # গ্রুপগুলোতে পোস্ট করা
+                    # ওটিপি গ্রুপে মেসেজ সেন্ড
                     for dest_id in config.get("OTP_DESTINATIONS", []):
                         try:
-                            if str(dest_id).strip() == "-1003956226642":
-                                continue
                             safe_send_message(int(dest_id), live_alert, reply_markup=markup)
                         except: pass
         except Exception as e:
             print(f"Monitor loop error: {e}")
             time.sleep(4)
 
-# --- Active Ranges Sync Engine (সার্ভিস নিখুঁতভাবে ম্যাপ করার ফিক্স) ---
+# --- Active Ranges Sync Engine (STRICT NO MIXING) ---
 def sync_services_once():
     global active_ranges_global, range_hits_count
     try:
@@ -1806,7 +1818,7 @@ def sync_services_once():
                     range_hits_count[clean_r] = hits
                     active_ranges_global.add(clean_r)
                     
-                    # সার্ভিস কোড ফিক্স (Facebook vs Instagram ফেক মিক্সিং রোধ)
+                    # কড়া সার্ভিস ফিল্টারিং
                     if service_raw in ["tg", "telegram"]: service_id = "telegram"
                     elif service_raw in ["ig", "instagram", "ins", "insta", "inst"]: service_id = "instagram"
                     elif service_raw in ["fb", "facebook"]: service_id = "facebook"
